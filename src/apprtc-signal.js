@@ -80,13 +80,30 @@ function removeClient(rooms, roomId, clientId) {
   }
 }
 
+function summarizeMessage(message) {
+  if (!message || typeof message !== 'object') {
+    return { type: typeof message };
+  }
+  if (message.type === 'offer' || message.type === 'answer') {
+    return { type: message.type, sdpLength: typeof message.sdp === 'string' ? message.sdp.length : 0 };
+  }
+  if (message.type === 'candidate') {
+    const candidate = typeof message.candidate === 'string' ? message.candidate : '';
+    return { type: 'candidate', candidate: candidate.length > 64 ? `${candidate.slice(0, 64)}...` : candidate };
+  }
+  return { type: message.type ?? 'unknown' };
+}
+
 function relayMessage(room, senderId, message) {
+  let delivered = 0;
   const outbound = JSON.stringify({ from: senderId, message });
   for (const peer of room.clients.values()) {
     if (peer.clientId !== senderId && peer.socket && peer.socket.readyState === peer.socket.OPEN) {
       peer.socket.send(outbound);
+      delivered += 1;
     }
   }
+  return delivered;
 }
 
 export function createSignalingServer(options = {}) {
@@ -95,6 +112,12 @@ export function createSignalingServer(options = {}) {
     iceServers = DEFAULT_ICE_SERVERS,
   } = options;
   const rooms = new Map();
+  const events = [];
+
+  function recordEvent(event) {
+    events.push({ timestamp: new Date().toISOString(), ...event });
+    if (events.length > 200) events.splice(0, events.length - 200);
+  }
 
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, publicBaseUrl);
@@ -111,6 +134,7 @@ export function createSignalingServer(options = {}) {
       const id = clientId();
       const isInitiator = room.clients.size === 0;
       room.clients.set(id, { clientId: id, socket: null });
+      recordEvent({ event: 'join', roomId, clientId: id, initiator: isInitiator });
 
       json(response, 200, {
         result: 'SUCCESS',
@@ -154,7 +178,10 @@ export function createSignalingServer(options = {}) {
       }
 
       try {
-        relayMessage(room, clientId, JSON.parse(body));
+        const message = JSON.parse(body);
+        recordEvent({ event: 'message', roomId, clientId, transport: 'http', message: summarizeMessage(message) });
+        const delivered = relayMessage(room, clientId, message);
+        recordEvent({ event: 'relay', roomId, clientId, transport: 'http', delivered });
       } catch {
         json(response, 400, { result: 'ERROR', error: 'invalid json' });
         return;
@@ -166,6 +193,11 @@ export function createSignalingServer(options = {}) {
 
     if (request.method === 'GET' && url.pathname === '/debug/rooms') {
       json(response, 200, roomSnapshot(rooms));
+      return;
+    }
+
+    if (request.method === 'GET' && url.pathname === '/debug/events') {
+      json(response, 200, { events });
       return;
     }
 
@@ -187,6 +219,7 @@ export function createSignalingServer(options = {}) {
     const client = room.clients.get(id) ?? { clientId: id, socket: null };
     client.socket = socket;
     room.clients.set(id, client);
+    recordEvent({ event: 'ws-open', roomId, clientId: id });
 
     socket.on('message', (data) => {
       let message;
@@ -197,12 +230,15 @@ export function createSignalingServer(options = {}) {
         return;
       }
 
-      relayMessage(room, id, message);
+      recordEvent({ event: 'message', roomId, clientId: id, transport: 'websocket', message: summarizeMessage(message) });
+      const delivered = relayMessage(room, id, message);
+      recordEvent({ event: 'relay', roomId, clientId: id, transport: 'websocket', delivered });
     });
 
     socket.on('close', () => {
       const current = room.clients.get(id);
       if (current?.socket === socket) {
+        recordEvent({ event: 'close', roomId, clientId: id });
         removeClient(rooms, roomId, id);
       }
     });
