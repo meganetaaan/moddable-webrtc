@@ -1,6 +1,11 @@
 import http from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { WebSocketServer } from 'ws';
+
+const ROOT_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
 const DEFAULT_ICE_SERVERS = [
   { urls: ['stun:stun.l.google.com:19302'], username: 'unused', credential: 'unused' },
@@ -10,6 +15,15 @@ function json(response, statusCode, body) {
   const payload = JSON.stringify(body);
   response.writeHead(statusCode, {
     'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(payload),
+  });
+  response.end(payload);
+}
+
+async function textFile(response, contentType, path) {
+  const payload = await readFile(path, 'utf8');
+  response.writeHead(200, {
+    'content-type': `${contentType}; charset=utf-8`,
     'content-length': Buffer.byteLength(payload),
   });
   response.end(payload);
@@ -116,6 +130,16 @@ export function createSignalingServer(options = {}) {
 
     if (request.method === 'GET' && url.pathname === '/ice') {
       json(response, 200, { result: 'SUCCESS', iceServers });
+      return;
+    }
+
+    if (request.method === 'GET' && url.pathname === '/probe') {
+      await textFile(response, 'text/html', join(ROOT_DIR, 'public/probe.html'));
+      return;
+    }
+
+    if (request.method === 'GET' && url.pathname === '/browser-probe.js') {
+      await textFile(response, 'text/javascript', join(ROOT_DIR, 'src/browser-probe.js'));
       return;
     }
 
