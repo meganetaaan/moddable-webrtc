@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { WebSocketServer } from 'ws';
@@ -108,6 +108,13 @@ function relayMessage(room, senderId, message) {
     }
   }
   return delivered;
+}
+
+export function isDirectRun(metaUrl = import.meta.url, argv1 = process.argv[1]) {
+  if (!argv1) return false;
+  const modulePath = fileURLToPath(metaUrl);
+  const resolvedArgv = resolve(argv1);
+  return modulePath === resolvedArgv;
 }
 
 export function createSignalingServer(options = {}) {
@@ -278,11 +285,13 @@ export function createSignalingServer(options = {}) {
   };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isDirectRun()) {
   const port = Number.parseInt(process.env.PORT || '18090', 10);
   const host = process.env.HOST || '0.0.0.0';
   const publicBaseUrl = process.env.PUBLIC_BASE_URL || `http://127.0.0.1:${port}`;
   const app = createSignalingServer({ publicBaseUrl });
+  const keepAlive = setInterval(() => {}, 1 << 30);
+  app.server.on('close', () => clearInterval(keepAlive));
   app.server.listen(port, host, () => {
     console.log(`AppRTC signaling server listening on ${host}:${port}`);
     console.log(`PUBLIC_BASE_URL=${publicBaseUrl}`);

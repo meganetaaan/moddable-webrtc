@@ -56,6 +56,14 @@ Terminal 1, from the repository root:
 PUBLIC_BASE_URL=http://<lan-host-ip>:18090 PORT=18090 npm run start:signaling
 ```
 
+Or:
+
+```sh
+PORT=18090 ROOM=stackchan npm run start:lan-signaling
+```
+
+The helper prints the browser probe URL and the firmware signaling base URL. Override `LAN_IP=<lan-host-ip>` if the first detected non-loopback IPv4 address is not reachable from the CoreS3.
+
 Terminal 2, from this directory:
 
 ```sh

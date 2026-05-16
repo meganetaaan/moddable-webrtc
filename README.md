@@ -34,6 +34,12 @@ PORT=18090 \
 npm run start:signaling
 ```
 
+Or let the helper choose the first non-loopback IPv4 address and print the exact audio probe URL:
+
+```bash
+PORT=18090 ROOM=stackchan npm run start:lan-signaling
+```
+
 For the CoreS3/Stack-chan firmware, use the same host and port in the AppRTC signaling URL, for example:
 
 ```text

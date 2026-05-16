@@ -5,6 +5,7 @@ import {
   buildCandidateMessage,
   buildOfferMessage,
   buildWsUrl,
+  describeDataChannelMessage,
   normalizeRemoteCandidate,
   parseProbeConfig,
   summarizeSdpMedia,
@@ -102,6 +103,13 @@ describe('browser probe helpers', () => {
     assert.equal(
       buildWsUrl('ws://192.168.7.135:18090/ws', 'stackchan', 'device-1234'),
       'ws://192.168.7.135:18090/ws?roomId=stackchan&clientId=device-1234',
+    );
+  });
+
+  it('labels DataChannel pong payloads as decisive evidence', () => {
+    assert.equal(
+      describeDataChannelMessage('{"type":"pong","from":"cores3"}'),
+      'datachannel pong from=cores3 payload={"type":"pong","from":"cores3"}',
     );
   });
 });

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import WebSocket from 'ws';
 
-import { createSignalingServer } from './apprtc-signal.js';
+import { createSignalingServer, isDirectRun } from './apprtc-signal.js';
 
 async function readJson(response) {
   return JSON.parse(await response.text());
@@ -48,6 +48,12 @@ function waitForMessage(socket) {
 }
 
 describe('AppRTC-compatible signaling server', () => {
+  it('detects direct CLI execution when Node receives a relative script path', () => {
+    assert.equal(isDirectRun(new URL('./apprtc-signal.js', import.meta.url).href, 'src/apprtc-signal.js'), true);
+    assert.equal(isDirectRun(new URL('./apprtc-signal.js', import.meta.url).href, 'src/other.js'), false);
+    assert.equal(isDirectRun(new URL('./apprtc-signal.js', import.meta.url).href, undefined), false);
+  });
+
   let app;
   let baseUrl;
 
