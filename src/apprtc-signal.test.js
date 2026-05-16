@@ -192,11 +192,14 @@ describe('AppRTC-compatible signaling server', () => {
       socketA.once('close', resolve);
       socketA.close();
     });
-    socketB.close();
 
     const response = await fetch(`${baseUrl}/debug/events`);
     assert.equal(response.status, 200);
     const { events } = await readJson(response);
+    await new Promise((resolve) => {
+      socketB.once('close', resolve);
+      socketB.close();
+    });
 
     const eventSummaries = events.map((event) => ({ event: event.event, roomId: event.roomId, clientId: event.clientId, transport: event.transport }));
     assert.deepEqual(eventSummaries.slice(0, 2), [
