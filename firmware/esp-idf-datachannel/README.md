@@ -34,6 +34,20 @@ Set:
 
 Do not commit generated `sdkconfig` with real credentials.
 
+## Partition layout
+
+This project tracks `partitions.csv` and selects it from `sdkconfig.defaults` with `CONFIG_PARTITION_TABLE_CUSTOM=y`. CoreS3 is documented by M5Stack with 16 MB flash, so `sdkconfig.defaults` also selects `CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y`.
+
+Current layout:
+
+| Name | Type | Subtype | Offset | Size | Purpose |
+|---|---|---|---:|---:|---|
+| `nvs` | `data` | `nvs` | `0x9000` | `0x6000` | Wi-Fi and ESP-IDF key-value storage |
+| `phy_init` | `data` | `phy` | `0xf000` | `0x1000` | RF calibration data |
+| `factory` | `app` | `factory` | `0x10000` | `0x700000` | Native WebRTC DataChannel + audio probe |
+
+The factory app slot is 7 MiB instead of the ESP-IDF default 1 MiB. The previous clean ESP-IDF build produced `stackchan_espidf_datachannel.bin binary size 0xfb5f0 bytes`, leaving only `0x4a10 bytes (2%) free` in the default partition. With this custom table, the same binary reports `Smallest app partition is 0x700000 bytes` and `0x604a10 bytes (86%) free`. The default layout was too close to the limit for the next transport work, especially microphone, camera, display, speaker, and peripheral measurements. Keep this layout single-factory for now; OTA partitions would reduce the immediate app headroom and are not needed to prove CoreS3 to PC DataChannel plus one media path.
+
 ## Run
 
 Terminal 1, from the repository root:
@@ -67,6 +81,7 @@ curl http://<lan-host-ip>:18090/debug/events
 
 Capture these lines with timestamps:
 
+- Build output: `stackchan_espidf_datachannel.bin binary size ...` and the app partition size/free percentage line.
 - Wi-Fi connected state and IP address.
 - `/ping` and `/join` HTTP status, byte count, room, assigned client id, and `wss_url`.
 - WebSocket open, close, error, incoming message type, and bounded payload prefix.
