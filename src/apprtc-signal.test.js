@@ -104,6 +104,42 @@ describe('AppRTC-compatible signaling server', () => {
     socketOther.close();
   });
 
+  it('relays messages posted to the advertised HTTP fallback URL', async () => {
+    const a = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const b = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const socketB = new WebSocket(wsUrl(baseUrl, 'stackchan', b.params.client_id));
+    await waitForOpen(socketB);
+
+    const receivedByB = waitForMessage(socketB);
+    const response = await fetch(a.params.wss_post_url.replace('http://device-host.test:18090', baseUrl), {
+      method: 'POST',
+      body: JSON.stringify({ type: 'candidate', candidate: 'candidate:1 1 udp ...' }),
+    });
+
+    assert.deepEqual(await readJson(response), { result: 'SUCCESS' });
+    assert.deepEqual(await receivedByB, {
+      from: a.params.client_id,
+      message: { type: 'candidate', candidate: 'candidate:1 1 udp ...' },
+    });
+
+    socketB.close();
+  });
+
+  it('removes disconnected WebSocket clients so a later single client becomes initiator', async () => {
+    const first = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const socket = new WebSocket(wsUrl(baseUrl, 'stackchan', first.params.client_id));
+    await waitForOpen(socket);
+
+    await new Promise((resolve) => {
+      socket.once('close', resolve);
+      socket.close();
+    });
+
+    const second = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+
+    assert.equal(second.params.is_initiator, 'true');
+  });
+
   it('exposes debug room/client state', async () => {
     const joined = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
 

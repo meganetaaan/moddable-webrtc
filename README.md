@@ -13,6 +13,7 @@ It intentionally proves only the signaling layer:
 - `POST /join/:roomId` returns AppRTC-style room metadata
 - `GET /ice` returns AppRTC-style ICE metadata
 - WebSocket `/ws?roomId=<room>&clientId=<id>` relays JSON messages to peers in the same room
+- `POST /message/:roomId/:clientId` provides the AppRTC HTTP fallback relay advertised as `wss_post_url`
 - `GET /debug/rooms` shows current room/client state
 
 ### Install and test

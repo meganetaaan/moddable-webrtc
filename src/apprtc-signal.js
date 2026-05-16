@@ -57,6 +57,24 @@ function ensureRoom(rooms, roomId) {
   return rooms.get(roomId);
 }
 
+function removeClient(rooms, roomId, clientId) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+  room.clients.delete(clientId);
+  if (room.clients.size === 0) {
+    rooms.delete(roomId);
+  }
+}
+
+function relayMessage(room, senderId, message) {
+  const outbound = JSON.stringify({ from: senderId, message });
+  for (const peer of room.clients.values()) {
+    if (peer.clientId !== senderId && peer.socket && peer.socket.readyState === peer.socket.OPEN) {
+      peer.socket.send(outbound);
+    }
+  }
+}
+
 export function createSignalingServer(options = {}) {
   const {
     publicBaseUrl = `http://127.0.0.1:${process.env.PORT || 18090}`,
@@ -101,6 +119,27 @@ export function createSignalingServer(options = {}) {
       return;
     }
 
+    if (request.method === 'POST' && url.pathname.startsWith('/message/')) {
+      const [, , encodedRoomId, clientId] = url.pathname.split('/');
+      const roomId = decodeURIComponent(encodedRoomId || '');
+      const body = await readRequestBody(request);
+      const room = rooms.get(roomId);
+      if (!room || !room.clients.has(clientId)) {
+        json(response, 404, { result: 'ERROR', error: 'unknown room or client' });
+        return;
+      }
+
+      try {
+        relayMessage(room, clientId, JSON.parse(body));
+      } catch {
+        json(response, 400, { result: 'ERROR', error: 'invalid json' });
+        return;
+      }
+
+      json(response, 200, { result: 'SUCCESS' });
+      return;
+    }
+
     if (request.method === 'GET' && url.pathname === '/debug/rooms') {
       json(response, 200, roomSnapshot(rooms));
       return;
@@ -134,18 +173,13 @@ export function createSignalingServer(options = {}) {
         return;
       }
 
-      const outbound = JSON.stringify({ from: id, message });
-      for (const peer of room.clients.values()) {
-        if (peer.clientId !== id && peer.socket && peer.socket.readyState === peer.socket.OPEN) {
-          peer.socket.send(outbound);
-        }
-      }
+      relayMessage(room, id, message);
     });
 
     socket.on('close', () => {
       const current = room.clients.get(id);
       if (current?.socket === socket) {
-        current.socket = null;
+        removeClient(rooms, roomId, id);
       }
     });
   });
