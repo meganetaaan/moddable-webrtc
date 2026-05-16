@@ -7,17 +7,19 @@ import {
   buildWsUrl,
   normalizeRemoteCandidate,
   parseProbeConfig,
+  summarizeSdpMedia,
 } from './browser-probe.js';
 
 describe('browser probe helpers', () => {
-  it('parses signaling, room, role, and ICE policy from query parameters', () => {
-    const config = parseProbeConfig('?signal=http%3A%2F%2F192.168.7.135%3A18090&room=stackchan&role=answerer&icePolicy=relay', 'http://localhost:18090');
+  it('parses signaling, room, role, ICE policy, and media from query parameters', () => {
+    const config = parseProbeConfig('?signal=http%3A%2F%2F192.168.7.135%3A18090&room=stackchan&role=answerer&icePolicy=relay&media=audio', 'http://localhost:18090');
 
     assert.deepEqual(config, {
       signalBaseUrl: 'http://192.168.7.135:18090',
       roomId: 'stackchan',
       role: 'answerer',
       iceTransportPolicy: 'relay',
+      media: 'audio',
     });
   });
 
@@ -27,7 +29,12 @@ describe('browser probe helpers', () => {
       roomId: 'stackchan',
       role: 'offerer',
       iceTransportPolicy: 'all',
+      media: 'none',
     });
+  });
+
+  it('ignores unknown media modes', () => {
+    assert.equal(parseProbeConfig('?media=screen', 'http://127.0.0.1:18090').media, 'none');
   });
 
   it('builds raw-candidate AppRTC messages instead of serializing the full RTCIceCandidate object', () => {
@@ -82,6 +89,13 @@ describe('browser probe helpers', () => {
       type: 'offer',
       sdp: 'v=0\r\n...',
     });
+  });
+
+  it('summarizes SDP media sections for logs', () => {
+    assert.equal(
+      summarizeSdpMedia('v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 8\r\na=mid:0\r\na=recvonly\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=mid:1\r\n'),
+      'm=audio 9 UDP/TLS/RTP/SAVPF 8 | a=mid:0 | a=recvonly | m=application 9 UDP/DTLS/SCTP webrtc-datachannel | a=mid:1',
+    );
   });
 
   it('builds a room/client websocket URL from the AppRTC join response URL', () => {

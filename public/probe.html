@@ -34,6 +34,16 @@
         padding: 1rem;
         white-space: pre-wrap;
       }
+      audio,
+      video {
+        display: block;
+        margin: 1rem 0;
+        max-width: min(42rem, 100%);
+      }
+      video {
+        background: #020617;
+        border: 1px solid #334155;
+      }
     </style>
   </head>
   <body>
@@ -44,10 +54,12 @@
     </p>
     <p>
       Query parameters:
-      <code>?signal=http://192.168.7.135:18090&amp;room=stackchan&amp;role=offerer&amp;icePolicy=all</code>
+      <code>?signal=http://192.168.7.135:18090&amp;room=stackchan&amp;role=offerer&amp;icePolicy=all&amp;media=audio</code>
     </p>
     <button id="start" type="button">Start probe</button>
     <p>Status: <strong id="status">idle</strong></p>
+    <audio id="remoteAudio" controls autoplay></audio>
+    <video id="remoteVideo" controls autoplay playsinline muted></video>
     <pre id="log" aria-live="polite"></pre>
     <script type="module" src="/browser-probe.js"></script>
   </body>

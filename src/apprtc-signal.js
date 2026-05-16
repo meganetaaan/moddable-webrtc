@@ -85,7 +85,11 @@ function summarizeMessage(message) {
     return { type: typeof message };
   }
   if (message.type === 'offer' || message.type === 'answer') {
-    return { type: message.type, sdpLength: typeof message.sdp === 'string' ? message.sdp.length : 0 };
+    const sdp = typeof message.sdp === 'string' ? message.sdp : '';
+    const media = sdp
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('m=') || line.startsWith('a=mid:') || line === 'a=sendonly' || line === 'a=recvonly' || line === 'a=sendrecv' || line === 'a=inactive');
+    return { type: message.type, sdpLength: sdp.length, media };
   }
   if (message.type === 'candidate') {
     const candidate = typeof message.candidate === 'string' ? message.candidate : '';

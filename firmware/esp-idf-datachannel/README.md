@@ -1,13 +1,16 @@
-# ESP-IDF native DataChannel probe
+# ESP-IDF native DataChannel + audio probe
 
-This is the native-only CoreS3 slice for issue #8. It intentionally uses the repository AppRTC signaling server and keeps the control plane to DataChannel ping/pong.
+This is the native-only CoreS3 slice for the current goal: M5Stack CoreS3 ↔ PC WebRTC DataChannel ping/pong plus one media path. It intentionally uses the repository AppRTC signaling server, keeps the control plane to tiny DataChannel ping/pong, and adds a generated send-only PCMA audio source as the first media proof.
+
+Audio is the first media path because `esp_peer` 1.4.1 exposes `audio_dir`, `on_audio_data`, and `esp_peer_send_audio()`, supports G.711 A-law/PCMA, and the browser can receive that codec without camera or H.264 encoder work. CoreS3 microphone capture is not wired yet; the generated source proves SDP audio negotiation, RTP/SRTP send, browser `ontrack`, and receive counters before adding I2S peripheral risk.
 
 ## Minimum next milestone
 
 The next hardware run is successful if it reaches one of these boundaries:
 
 - DataChannel opens and the browser probe receives `{"type":"pong","from":"cores3"}` after its ping.
-- `/debug/events` plus serial logs prove the exact stop point: offer received, `esp_peer_send_msg` failed, no local answer callback, answer relayed but ICE stalled, or DataChannel never opened.
+- Browser `media=audio` produces an audio `ontrack` event and inbound RTP stats while firmware logs `audio tx frames=...`.
+- `/debug/events` plus serial logs prove the exact stop point: offer received, media section missing, `esp_peer_send_msg` failed, no local answer callback, answer relayed but ICE stalled, DataChannel never opened, or media counters never move.
 
 ## Configure
 
@@ -24,6 +27,10 @@ Set:
 - `Stack-chan ESP-IDF DataChannel probe -> Wi-Fi password`
 - `Stack-chan ESP-IDF DataChannel probe -> AppRTC signaling base URL`
 - `Stack-chan ESP-IDF DataChannel probe -> AppRTC signaling room`
+- `Stack-chan ESP-IDF DataChannel probe -> WebRTC media mode`
+  - `Audio: generated PCMA test source` for the native media proof.
+  - `None: DataChannel only` if you need to bisect a DataChannel regression.
+  - `Video placeholder` only documents the future camera path and leaves media disabled.
 
 Do not commit generated `sdkconfig` with real credentials.
 
@@ -45,7 +52,7 @@ idf.py -p <serial-port> flash monitor
 Browser:
 
 ```text
-http://<lan-host-ip>:18090/probe?signal=http://<lan-host-ip>:18090&room=stackchan&role=offerer&icePolicy=all
+http://<lan-host-ip>:18090/probe?signal=http://<lan-host-ip>:18090&room=stackchan&role=offerer&icePolicy=all&media=audio
 ```
 
 Server inspection:
@@ -69,18 +76,21 @@ Capture these lines with timestamps:
 - Local `peer on_msg(answer)` and `peer on_msg(candidate)` callbacks.
 - Peer state changes.
 - DataChannel message callback and pong send return code.
+- Media mode, negotiated audio info, audio task start, `audio tx frames`, `audio tx bytes`, `audio tx drops`, and heap while audio is running.
+- Browser `remote answer media ... m=audio ... a=sendonly`, `ontrack kind=audio`, `track unmute kind=audio`, and `stats audio packets=... bytes=...`.
 
 ## Boundary Table
 
 | Layer | Result | Evidence |
 |---|---|---|
-| Wi-Fi/TCP/HTTP reachability | pending | Serial IP log, `GET /ping`, signaling server log |
+| Wi-Fi/TCP/HTTP | pending | CoreS3 IP, `GET /ping`, HTTP status |
 | Signaling room | pending | `/debug/rooms`, `/debug/events` join and ws-open |
-| Peer allocation/open | pending | Heap before/after + `esp_peer_open ret=` |
-| Offer delivery | pending | Serial `signaling message type=offer` + `esp_peer_send_msg type=offer ret=` |
-| Answer callback | pending | Serial `peer on_msg(answer)` and `/debug/events` answer summary |
+| Peer open | pending | Heap before/after + `esp_peer_open ret=` |
+| Offer/answer | pending | SDP summaries, serial `peer on_msg(answer)`, `/debug/events` answer summary |
 | ICE/DTLS/SCTP | pending | Peer state logs and candidate callbacks/events |
 | DataChannel | pending | DataChannel callback + browser ping/pong log |
+| Media negotiation | pending | Browser offer/answer media summary, firmware `audio info`, browser `ontrack` |
+| Media samples/frames | pending | Firmware `audio tx frames/bytes/drops`, browser inbound RTP stats, heap/CPU notes |
 
 Update the Result column to pass/fail during each run and paste the exact evidence beside it.
 
@@ -94,7 +104,10 @@ Browser probe RTCPeerConnection
   -> CoreS3 ESP-IDF app
   -> esp_peer
   -> SCTP DataChannel stackchan-control ping/pong
+  -> SRTP audio track using generated 8 kHz mono G.711 A-law frames
 ```
+
+The audio source currently sends generated PCMA silence/test frames. To replace it with CoreS3 capture, wire an I2S microphone driver that produces 8 kHz mono G.711 A-law frames or add a narrow encoder step before `esp_peer_send_audio()`. Keep the existing generated source as a known-good transport baseline until microphone capture is independently measured.
 
 Future Moddable boundary:
 
@@ -110,8 +123,9 @@ Do not add the future bridge in this slice. First prove whether native ESP-IDF W
 
 - Internal heap and minimum heap before/after peer open and after ICE starts.
 - PSRAM free space on CoreS3.
-- CPU pressure during ICE/DTLS/SCTP setup and while ping/pong is active.
+- CPU pressure during ICE/DTLS/SCTP setup and while ping/pong plus audio RTP are active.
 - Latency from browser ping timestamp to CoreS3 callback and browser pong receipt.
+- Audio packet cadence, `audio tx drops`, browser inbound RTP packet/byte growth, and whether browser audio track mutes.
 - Contention with CoreS3 peripherals that future Stack-chan features need: display, speaker, microphone, servos, and camera if attached.
 
 ## Fallback plan

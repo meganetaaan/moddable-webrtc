@@ -2,6 +2,8 @@
 
 ESP32-S3 / Moddable WebRTC remote-control experiments for Stack-chan.
 
+Current goal: prove M5Stack CoreS3 ↔ PC WebRTC DataChannel ping/pong plus one media path, then use the evidence to decide the next native firmware step.
+
 This repository keeps reusable signaling, browser, and firmware spike assets out of `/tmp` so WebRTC boundaries can be reproduced across WSL restarts.
 
 ## Development AppRTC signaling server
@@ -67,16 +69,16 @@ curl http://127.0.0.1:18090/debug/events
 After the signaling server is running, open the browser probe from the same server:
 
 ```text
-http://127.0.0.1:18090/probe?room=stackchan&role=offerer&icePolicy=all
+http://127.0.0.1:18090/probe?room=stackchan&role=offerer&icePolicy=all&media=audio
 ```
 
 For CoreS3/Stack-chan LAN checks, use the Windows/LAN host address that the device can reach:
 
 ```text
-http://192.168.7.135:18090/probe?signal=http://192.168.7.135:18090&room=stackchan&role=offerer&icePolicy=all
+http://192.168.7.135:18090/probe?signal=http://192.168.7.135:18090&room=stackchan&role=offerer&icePolicy=all&media=audio
 ```
 
-The probe joins the room, opens `/ws`, creates a DataChannel in browser-offerer mode, sends an SDP offer, and sends ICE candidates as raw candidate lines in AppRTC-style messages:
+The probe joins the room, opens `/ws`, creates a DataChannel in browser-offerer mode, optionally adds one `recvonly` media transceiver with `media=audio` or `media=video`, sends an SDP offer, and sends ICE candidates as raw candidate lines in AppRTC-style messages:
 
 ```json
 {
@@ -92,13 +94,13 @@ This keeps the next boundary narrow:
 1. Start the signaling server with `PUBLIC_BASE_URL` set to the LAN-reachable URL.
 2. Start the CoreS3 firmware pointed at the same base URL and room.
 3. Open `/probe` in a browser with the same room.
-4. Watch `/debug/rooms`, browser logs, and CoreS3 serial logs.
+4. Watch `/debug/rooms`, `/debug/events`, browser logs, and CoreS3 serial logs.
 5. Only interpret WebRTC feasibility after confirming `/join`, `/ws`, offer, and raw candidate delivery.
 
 ## ESP-IDF native CoreS3 DataChannel probe
 
-The native-only issue #8 scaffold lives in `firmware/esp-idf-datachannel/`.
+The native-only issue #8/#9 scaffold lives in `firmware/esp-idf-datachannel/`.
 
-It joins the same AppRTC signaling server, opens the advertised `/ws`, forwards browser-offerer `offer` and raw `candidate` messages into `esp_peer`, logs `esp_peer_open` / `esp_peer_send_msg` return codes and heap boundaries, and replies to DataChannel ping with a tiny pong if SCTP opens.
+It joins the same AppRTC signaling server, opens the advertised `/ws`, forwards browser-offerer `offer` and raw `candidate` messages into `esp_peer`, logs `esp_peer_open` / `esp_peer_send_msg` return codes and heap boundaries, replies to DataChannel ping with a tiny pong if SCTP opens, and can negotiate a send-only generated PCMA audio test source for browser `ontrack`/RTP counter evidence.
 
-See `firmware/esp-idf-datachannel/README.md` for menuconfig fields, hardware run steps, resource metrics, fallback plan, and the boundary table for the next CoreS3 run.
+Audio was chosen before video because `esp_peer` directly supports G.711 A-law audio frames and browsers can receive PCMA without CoreS3 camera/H.264 plumbing. See `firmware/esp-idf-datachannel/README.md` for menuconfig fields, hardware run steps, resource metrics, fallback plan, and the boundary table for the next CoreS3 run.

@@ -2,12 +2,14 @@ export function parseProbeConfig(search = globalThis.location?.search ?? '', ori
   const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
   const role = params.get('role') === 'answerer' ? 'answerer' : 'offerer';
   const iceTransportPolicy = params.get('icePolicy') === 'relay' ? 'relay' : 'all';
+  const media = ['audio', 'video'].includes(params.get('media')) ? params.get('media') : 'none';
 
   return {
     signalBaseUrl: params.get('signal') || origin,
     roomId: params.get('room') || 'stackchan',
     role,
     iceTransportPolicy,
+    media,
   };
 }
 
@@ -49,6 +51,13 @@ export function normalizeRemoteCandidate(message) {
   return candidate;
 }
 
+export function summarizeSdpMedia(sdp = '') {
+  return sdp
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith('m=') || line.startsWith('a=mid:') || line === 'a=sendonly' || line === 'a=recvonly' || line === 'a=sendrecv' || line === 'a=inactive')
+    .join(' | ');
+}
+
 function appendLog(line) {
   const output = document.querySelector('#log');
   const timestamp = new Date().toISOString();
@@ -60,6 +69,58 @@ function appendLog(line) {
 function setStatus(status) {
   const target = document.querySelector('#status');
   if (target) target.textContent = status;
+}
+
+function attachRemoteTrack(track, streams) {
+  appendLog(`ontrack kind=${track.kind} id=${track.id} state=${track.readyState} muted=${track.muted}`);
+  track.onunmute = () => appendLog(`track unmute kind=${track.kind}`);
+  track.onmute = () => appendLog(`track mute kind=${track.kind}`);
+  track.onended = () => appendLog(`track ended kind=${track.kind}`);
+
+  const media = track.kind === 'video' ? document.querySelector('#remoteVideo') : document.querySelector('#remoteAudio');
+  if (media && streams[0]) {
+    media.srcObject = streams[0];
+    media.play?.().catch((error) => appendLog(`${track.kind} autoplay blocked ${error.message}`));
+  }
+
+  if (track.kind === 'video' && media?.requestVideoFrameCallback) {
+    let frames = 0;
+    const countFrame = () => {
+      frames += 1;
+      if (frames === 1 || frames % 30 === 0) appendLog(`video frames=${frames}`);
+      media.requestVideoFrameCallback(countFrame);
+    };
+    media.requestVideoFrameCallback(countFrame);
+  }
+}
+
+function configureMedia(peer, config) {
+  if (config.media === 'audio') {
+    peer.addTransceiver('audio', { direction: 'recvonly' });
+    appendLog('media requested audio recvonly');
+  } else if (config.media === 'video') {
+    peer.addTransceiver('video', { direction: 'recvonly' });
+    appendLog('media requested video recvonly');
+  } else {
+    appendLog('media disabled');
+  }
+}
+
+function startStatsLog(peer, config) {
+  if (config.media === 'none') return;
+  setInterval(async () => {
+    try {
+      const stats = await peer.getStats();
+      for (const report of stats.values()) {
+        if (report.type === 'inbound-rtp' && !report.isRemote && report.kind === config.media) {
+          const frames = report.framesDecoded ?? report.totalSamplesReceived ?? report.packetsReceived ?? 0;
+          appendLog(`stats ${report.kind} packets=${report.packetsReceived ?? 0} bytes=${report.bytesReceived ?? 0} evidence=${frames}`);
+        }
+      }
+    } catch (error) {
+      appendLog(`stats error ${error.message}`);
+    }
+  }, 3000);
 }
 
 async function joinRoom(config) {
@@ -88,6 +149,7 @@ async function createPeerConnection(config, sendMessage) {
   };
   peer.onconnectionstatechange = () => appendLog(`connectionState=${peer.connectionState}`);
   peer.oniceconnectionstatechange = () => appendLog(`iceConnectionState=${peer.iceConnectionState}`);
+  peer.ontrack = (event) => attachRemoteTrack(event.track, event.streams);
   peer.ondatachannel = (event) => {
     const channel = event.channel;
     appendLog(`datachannel received label=${channel.label}`);
@@ -95,6 +157,8 @@ async function createPeerConnection(config, sendMessage) {
     channel.onmessage = (messageEvent) => appendLog(`datachannel message ${messageEvent.data}`);
   };
 
+  configureMedia(peer, config);
+  startStatsLog(peer, config);
   return peer;
 }
 
@@ -103,14 +167,17 @@ async function handleRemoteMessage(peer, payload, sendMessage) {
   appendLog(`recv ${message.type ?? 'raw'} from ${payload.from ?? 'unknown'}`);
 
   if (message.type === 'offer') {
+    appendLog(`remote offer media ${summarizeSdpMedia(message.sdp)}`);
     await peer.setRemoteDescription({ type: 'offer', sdp: message.sdp });
     const answer = await peer.createAnswer();
     await peer.setLocalDescription(answer);
     sendMessage(buildAnswerMessage(answer));
+    appendLog(`answer media ${summarizeSdpMedia(answer.sdp)}`);
     return;
   }
 
   if (message.type === 'answer') {
+    appendLog(`remote answer media ${summarizeSdpMedia(message.sdp)}`);
     await peer.setRemoteDescription({ type: 'answer', sdp: message.sdp });
     return;
   }
@@ -152,7 +219,7 @@ export async function startBrowserProbe() {
       const offer = await peer.createOffer();
       await peer.setLocalDescription(offer);
       sendMessage(buildOfferMessage(offer));
-      appendLog('offer sent');
+      appendLog(`offer sent media ${summarizeSdpMedia(offer.sdp)}`);
     }
   };
   ws.onmessage = async (event) => {

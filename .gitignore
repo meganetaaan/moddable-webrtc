@@ -2,3 +2,8 @@ node_modules/
 coverage/
 .env
 *.log
+
+# ESP-IDF generated outputs
+firmware/esp-idf-datachannel/build/
+firmware/esp-idf-datachannel/managed_components/
+firmware/esp-idf-datachannel/sdkconfig
