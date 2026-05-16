@@ -169,4 +169,61 @@ describe('AppRTC-compatible signaling server', () => {
       },
     });
   });
+
+  it('records compact debug events for joins, websocket relay, HTTP fallback relay, and close', async () => {
+    const a = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const b = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const socketA = new WebSocket(wsUrl(baseUrl, 'stackchan', a.params.client_id));
+    const socketB = new WebSocket(wsUrl(baseUrl, 'stackchan', b.params.client_id));
+    await Promise.all([waitForOpen(socketA), waitForOpen(socketB)]);
+
+    const receivedOffer = waitForMessage(socketB);
+    socketA.send(JSON.stringify({ type: 'offer', sdp: 'v=0\r\na=setup:actpass\r\n' }));
+    await receivedOffer;
+
+    const receivedCandidate = waitForMessage(socketB);
+    await fetch(a.params.wss_post_url.replace('http://device-host.test:18090', baseUrl), {
+      method: 'POST',
+      body: JSON.stringify({ type: 'candidate', candidate: 'candidate:1 1 udp 2122260223 192.0.2.1 54545 typ host generation 0' }),
+    });
+    await receivedCandidate;
+
+    await new Promise((resolve) => {
+      socketA.once('close', resolve);
+      socketA.close();
+    });
+    socketB.close();
+
+    const response = await fetch(`${baseUrl}/debug/events`);
+    assert.equal(response.status, 200);
+    const { events } = await readJson(response);
+
+    const eventSummaries = events.map((event) => ({ event: event.event, roomId: event.roomId, clientId: event.clientId, transport: event.transport }));
+    assert.deepEqual(eventSummaries.slice(0, 2), [
+      { event: 'join', roomId: 'stackchan', clientId: a.params.client_id, transport: undefined },
+      { event: 'join', roomId: 'stackchan', clientId: b.params.client_id, transport: undefined },
+    ]);
+    assert.deepEqual(
+      eventSummaries
+        .slice(2, 4)
+        .sort((left, right) => left.clientId.localeCompare(right.clientId)),
+      [
+        { event: 'ws-open', roomId: 'stackchan', clientId: a.params.client_id, transport: undefined },
+        { event: 'ws-open', roomId: 'stackchan', clientId: b.params.client_id, transport: undefined },
+      ].sort((left, right) => left.clientId.localeCompare(right.clientId)),
+    );
+    assert.deepEqual(eventSummaries.slice(4), [
+      { event: 'message', roomId: 'stackchan', clientId: a.params.client_id, transport: 'websocket' },
+      { event: 'relay', roomId: 'stackchan', clientId: a.params.client_id, transport: 'websocket' },
+      { event: 'message', roomId: 'stackchan', clientId: a.params.client_id, transport: 'http' },
+      { event: 'relay', roomId: 'stackchan', clientId: a.params.client_id, transport: 'http' },
+      { event: 'close', roomId: 'stackchan', clientId: a.params.client_id, transport: undefined },
+    ]);
+
+    const messageEvents = events.filter((event) => event.event === 'message');
+    assert.deepEqual(messageEvents.map((event) => event.message), [
+      { type: 'offer', sdpLength: 22 },
+      { type: 'candidate', candidate: 'candidate:1 1 udp 2122260223 192.0.2.1 54545 typ host generation...' },
+    ]);
+  });
 });

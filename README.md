@@ -50,7 +50,15 @@ On WSL2, keep the boundary explicit:
 curl -X POST http://127.0.0.1:18090/join/stackchan
 curl http://127.0.0.1:18090/ice
 curl http://127.0.0.1:18090/debug/rooms
+curl http://127.0.0.1:18090/debug/events
 ```
+
+`/debug/events` keeps a bounded in-memory trace of recent signaling activity. It records joins, WebSocket connects/closes, and compact message summaries such as `offer` SDP length or a truncated ICE candidate prefix. Use it before debugging ESP WebRTC internals:
+
+1. confirm both browser and CoreS3 appear in `/debug/rooms`,
+2. confirm the browser `offer` appears in `/debug/events`,
+3. confirm raw `candidate` messages appear after the offer,
+4. confirm a CoreS3 `answer` appears before investigating ICE/DataChannel failures.
 
 ## Browser signaling probe
 
