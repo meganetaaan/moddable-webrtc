@@ -15,6 +15,7 @@ It intentionally proves only the signaling layer:
 - WebSocket `/ws?roomId=<room>&clientId=<id>` relays JSON messages to peers in the same room
 - `POST /message/:roomId/:clientId` provides the AppRTC HTTP fallback relay advertised as `wss_post_url`
 - `GET /debug/rooms` shows current room/client state
+- `GET /ping` returns a tiny JSON reachability response for firmware TCP/HTTP checks
 
 ### Install and test
 
@@ -49,6 +50,7 @@ On WSL2, keep the boundary explicit:
 ```bash
 curl -X POST http://127.0.0.1:18090/join/stackchan
 curl http://127.0.0.1:18090/ice
+curl http://127.0.0.1:18090/ping
 curl http://127.0.0.1:18090/debug/rooms
 curl http://127.0.0.1:18090/debug/events
 ```
@@ -92,3 +94,11 @@ This keeps the next boundary narrow:
 3. Open `/probe` in a browser with the same room.
 4. Watch `/debug/rooms`, browser logs, and CoreS3 serial logs.
 5. Only interpret WebRTC feasibility after confirming `/join`, `/ws`, offer, and raw candidate delivery.
+
+## ESP-IDF native CoreS3 DataChannel probe
+
+The native-only issue #8 scaffold lives in `firmware/esp-idf-datachannel/`.
+
+It joins the same AppRTC signaling server, opens the advertised `/ws`, forwards browser-offerer `offer` and raw `candidate` messages into `esp_peer`, logs `esp_peer_open` / `esp_peer_send_msg` return codes and heap boundaries, and replies to DataChannel ping with a tiny pong if SCTP opens.
+
+See `firmware/esp-idf-datachannel/README.md` for menuconfig fields, hardware run steps, resource metrics, fallback plan, and the boundary table for the next CoreS3 run.

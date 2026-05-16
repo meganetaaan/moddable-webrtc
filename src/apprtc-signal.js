@@ -157,6 +157,11 @@ export function createSignalingServer(options = {}) {
       return;
     }
 
+    if (request.method === 'GET' && url.pathname === '/ping') {
+      json(response, 200, { result: 'SUCCESS', pong: true });
+      return;
+    }
+
     if (request.method === 'GET' && url.pathname === '/probe') {
       await textFile(response, 'text/html', join(ROOT_DIR, 'public/probe.html'));
       return;
@@ -205,6 +210,9 @@ export function createSignalingServer(options = {}) {
   });
 
   const websocketServer = new WebSocketServer({ server, path: '/ws' });
+  websocketServer.on('error', (error) => {
+    recordEvent({ event: 'ws-server-error', error: error.message });
+  });
   websocketServer.on('connection', (socket, request) => {
     const url = new URL(request.url, publicBaseUrl);
     const roomId = url.searchParams.get('roomId');
@@ -246,16 +254,23 @@ export function createSignalingServer(options = {}) {
 
   return {
     server,
-    close: () =>
-      new Promise((resolve, reject) => {
-        websocketServer.close((wsError) => {
-          server.close((serverError) => {
-            const error = wsError || serverError;
-            if (error) reject(error);
-            else resolve();
-          });
+    close: async () => {
+      for (const socket of websocketServer.clients) {
+        socket.close();
+      }
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) reject(error);
+          else resolve();
         });
-      }),
+      });
+      await new Promise((resolve, reject) => {
+        websocketServer.close((error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
+    },
   };
 }
 

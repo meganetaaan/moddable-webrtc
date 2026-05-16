@@ -1,0 +1,32 @@
+menu "Stack-chan ESP-IDF DataChannel probe"
+
+config STACKCHAN_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+    help
+        Local Wi-Fi SSID. Do not commit a real credential in sdkconfig.defaults.
+
+config STACKCHAN_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default ""
+    help
+        Local Wi-Fi password. Do not commit a real credential in sdkconfig.defaults.
+
+config STACKCHAN_SIGNAL_BASE_URL
+    string "AppRTC signaling base URL"
+    default "http://192.168.7.135:18090"
+    help
+        LAN-reachable base URL for src/apprtc-signal.js, without a trailing slash.
+
+config STACKCHAN_SIGNAL_ROOM
+    string "AppRTC signaling room"
+    default "stackchan"
+
+config STACKCHAN_LOG_PAYLOAD_PREFIX
+    int "Payload prefix bytes to log"
+    default 96
+    range 16 512
+    help
+        Bounded prefix length for serial logs of signaling payloads.
+
+endmenu
