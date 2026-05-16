@@ -1,0 +1,13 @@
+{
+  "name": "moddable-webrtc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "start:signaling": "node src/apprtc-signal.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
