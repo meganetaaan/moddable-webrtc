@@ -9,7 +9,18 @@ async function readJson(response) {
 }
 
 async function listen(app) {
-  await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve));
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      app.server.off('error', reject);
+      reject(new Error('server listen timed out'));
+    }, 2000);
+    app.server.once('error', reject);
+    app.server.listen(0, '127.0.0.1', () => {
+      clearTimeout(timeout);
+      app.server.off('error', reject);
+      resolve();
+    });
+  });
   const { port } = app.server.address();
   return `http://127.0.0.1:${port}`;
 }
@@ -58,6 +69,11 @@ describe('AppRTC-compatible signaling server', () => {
     assert.match(first.params.client_id, /^device-/);
     assert.equal(first.params.is_initiator, 'true');
     assert.equal(first.params.wss_url, 'ws://device-host.test:18090/ws');
+    assert.equal(first.params.wss_post_url, `http://device-host.test:18090/message/stackchan/${first.params.client_id}`);
+    assert.equal(first.params.ice_server_url, 'http://device-host.test:18090/ice');
+    assert.deepEqual(first.params.pc_config, {
+      iceServers: [{ urls: ['stun:stun.l.google.com:19302'], username: 'unused', credential: 'unused' }],
+    });
 
     assert.equal(second.result, 'SUCCESS');
     assert.notEqual(second.params.client_id, first.params.client_id);
@@ -71,6 +87,12 @@ describe('AppRTC-compatible signaling server', () => {
     assert.deepEqual(ice.iceServers, [
       { urls: ['stun:stun.l.google.com:19302'], username: 'unused', credential: 'unused' },
     ]);
+  });
+
+  it('serves a tiny reachability ping for firmware TCP/HTTP checks', async () => {
+    const ping = await readJson(await fetch(`${baseUrl}/ping`));
+
+    assert.deepEqual(ping, { result: 'SUCCESS', pong: true });
   });
 
   it('relays WebSocket messages only to peers in the same room', async () => {
@@ -188,6 +210,10 @@ describe('AppRTC-compatible signaling server', () => {
     });
     await receivedCandidate;
 
+    const receivedAnswer = waitForMessage(socketA);
+    socketB.send(JSON.stringify({ type: 'answer', sdp: 'v=0\r\na=setup:active\r\n' }));
+    await receivedAnswer;
+
     await new Promise((resolve) => {
       socketA.once('close', resolve);
       socketA.close();
@@ -220,6 +246,8 @@ describe('AppRTC-compatible signaling server', () => {
       { event: 'relay', roomId: 'stackchan', clientId: a.params.client_id, transport: 'websocket' },
       { event: 'message', roomId: 'stackchan', clientId: a.params.client_id, transport: 'http' },
       { event: 'relay', roomId: 'stackchan', clientId: a.params.client_id, transport: 'http' },
+      { event: 'message', roomId: 'stackchan', clientId: b.params.client_id, transport: 'websocket' },
+      { event: 'relay', roomId: 'stackchan', clientId: b.params.client_id, transport: 'websocket' },
       { event: 'close', roomId: 'stackchan', clientId: a.params.client_id, transport: undefined },
     ]);
 
@@ -227,6 +255,7 @@ describe('AppRTC-compatible signaling server', () => {
     assert.deepEqual(messageEvents.map((event) => event.message), [
       { type: 'offer', sdpLength: 22 },
       { type: 'candidate', candidate: 'candidate:1 1 udp 2122260223 192.0.2.1 54545 typ host generation...' },
+      { type: 'answer', sdpLength: 21 },
     ]);
   });
 });
