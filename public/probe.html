@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ESP32-S3 WebRTC browser probe</title>
+    <style>
+      body {
+        color: #e5e7eb;
+        background: #0f172a;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 2rem;
+      }
+      code,
+      pre {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+      a { color: #93c5fd; }
+      button {
+        background: #38bdf8;
+        border: 0;
+        border-radius: 0.5rem;
+        color: #082f49;
+        cursor: pointer;
+        font-weight: 700;
+        padding: 0.75rem 1rem;
+      }
+      #log {
+        background: #020617;
+        border: 1px solid #334155;
+        border-radius: 0.75rem;
+        min-height: 20rem;
+        overflow: auto;
+        padding: 1rem;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>ESP32-S3 WebRTC browser probe</h1>
+    <p>
+      Browser-side AppRTC signaling probe for Stack-chan/CoreS3 WebRTC boundary checks.
+      It joins the signaling room, opens <code>/ws</code>, and sends browser-offerer SDP plus raw ICE candidate lines.
+    </p>
+    <p>
+      Query parameters:
+      <code>?signal=http://192.168.7.135:18090&amp;room=stackchan&amp;role=offerer&amp;icePolicy=all</code>
+    </p>
+    <button id="start" type="button">Start probe</button>
+    <p>Status: <strong id="status">idle</strong></p>
+    <pre id="log" aria-live="polite"></pre>
+    <script type="module" src="/browser-probe.js"></script>
+  </body>
+</html>

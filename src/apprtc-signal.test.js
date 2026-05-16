@@ -140,6 +140,19 @@ describe('AppRTC-compatible signaling server', () => {
     assert.equal(second.params.is_initiator, 'true');
   });
 
+  it('serves the browser probe page and module', async () => {
+    const page = await fetch(`${baseUrl}/probe`);
+    const script = await fetch(`${baseUrl}/browser-probe.js`);
+
+    assert.equal(page.status, 200);
+    assert.equal(page.headers.get('content-type'), 'text/html; charset=utf-8');
+    assert.match(await page.text(), /ESP32-S3 WebRTC browser probe/);
+
+    assert.equal(script.status, 200);
+    assert.equal(script.headers.get('content-type'), 'text/javascript; charset=utf-8');
+    assert.match(await script.text(), /function parseProbeConfig/);
+  });
+
   it('exposes debug room/client state', async () => {
     const joined = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
 

@@ -51,3 +51,36 @@ curl -X POST http://127.0.0.1:18090/join/stackchan
 curl http://127.0.0.1:18090/ice
 curl http://127.0.0.1:18090/debug/rooms
 ```
+
+## Browser signaling probe
+
+After the signaling server is running, open the browser probe from the same server:
+
+```text
+http://127.0.0.1:18090/probe?room=stackchan&role=offerer&icePolicy=all
+```
+
+For CoreS3/Stack-chan LAN checks, use the Windows/LAN host address that the device can reach:
+
+```text
+http://192.168.7.135:18090/probe?signal=http://192.168.7.135:18090&room=stackchan&role=offerer&icePolicy=all
+```
+
+The probe joins the room, opens `/ws`, creates a DataChannel in browser-offerer mode, sends an SDP offer, and sends ICE candidates as raw candidate lines in AppRTC-style messages:
+
+```json
+{
+  "type": "candidate",
+  "candidate": "candidate:...",
+  "id": "0",
+  "label": 0
+}
+```
+
+This keeps the next boundary narrow:
+
+1. Start the signaling server with `PUBLIC_BASE_URL` set to the LAN-reachable URL.
+2. Start the CoreS3 firmware pointed at the same base URL and room.
+3. Open `/probe` in a browser with the same room.
+4. Watch `/debug/rooms`, browser logs, and CoreS3 serial logs.
+5. Only interpret WebRTC feasibility after confirming `/join`, `/ws`, offer, and raw candidate delivery.
