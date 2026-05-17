@@ -50,11 +50,11 @@
     <h1>ESP32-S3 WebRTC browser probe</h1>
     <p>
       Browser-side AppRTC signaling probe for Stack-chan/CoreS3 WebRTC boundary checks.
-      It joins the signaling room, opens <code>/ws</code>, and sends browser-offerer SDP plus raw ICE candidate lines.
+      It joins the signaling room, opens <code>/ws</code>, and exchanges browser-offerer or browser-answerer SDP plus raw ICE candidate lines.
     </p>
     <p>
       Query parameters:
-      <code>?signal=http://192.168.7.135:18090&amp;room=stackchan&amp;role=offerer&amp;icePolicy=all&amp;media=audio</code>
+      <code>?signal=http://192.168.7.135:18091&amp;room=stackchan&amp;role=offerer&amp;icePolicy=all&amp;media=audio</code>
     </p>
     <button id="start" type="button">Start probe</button>
     <p>Status: <strong id="status">idle</strong></p>

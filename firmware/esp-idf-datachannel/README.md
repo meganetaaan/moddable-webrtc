@@ -53,13 +53,13 @@ The factory app slot is 7 MiB instead of the ESP-IDF default 1 MiB. The previous
 Terminal 1, from the repository root:
 
 ```sh
-PUBLIC_BASE_URL=http://<lan-host-ip>:18090 PORT=18090 npm run start:signaling
+PUBLIC_BASE_URL=http://<lan-host-ip>:18091 PORT=18091 npm run start:signaling
 ```
 
 Or:
 
 ```sh
-PORT=18090 ROOM=stackchan npm run start:lan-signaling
+PORT=18091 ROOM=stackchan npm run start:lan-signaling
 ```
 
 The helper prints the browser probe URL and the firmware signaling base URL. Override `LAN_IP=<lan-host-ip>` if the first detected non-loopback IPv4 address is not reachable from the CoreS3.
@@ -74,15 +74,17 @@ idf.py -p <serial-port> flash monitor
 Browser:
 
 ```text
-http://<lan-host-ip>:18090/probe?signal=http://<lan-host-ip>:18090&room=stackchan&role=offerer&icePolicy=all&media=audio
+http://<lan-host-ip>:18091/probe?signal=http://<lan-host-ip>:18091&room=stackchan&role=offerer&icePolicy=all&media=audio
 ```
+
+If `WebRTC offerer role` is set to `ESP offerer: CoreS3 offers`, use the same probe with `role=answerer` so the browser answers the CoreS3 SDP offer.
 
 Server inspection:
 
 ```sh
-curl http://<lan-host-ip>:18090/ping
-curl http://<lan-host-ip>:18090/debug/rooms
-curl http://<lan-host-ip>:18090/debug/events
+curl http://<lan-host-ip>:18091/ping
+curl http://<lan-host-ip>:18091/debug/rooms
+curl http://<lan-host-ip>:18091/debug/events
 ```
 
 ## Expected serial evidence

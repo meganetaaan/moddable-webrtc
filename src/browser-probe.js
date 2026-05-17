@@ -1,4 +1,4 @@
-export function parseProbeConfig(search = globalThis.location?.search ?? '', origin = globalThis.location?.origin ?? 'http://127.0.0.1:18090') {
+export function parseProbeConfig(search = globalThis.location?.search ?? '', origin = globalThis.location?.origin ?? 'http://127.0.0.1:18091') {
   const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
   const role = params.get('role') === 'answerer' ? 'answerer' : 'offerer';
   const iceTransportPolicy = params.get('icePolicy') === 'relay' ? 'relay' : 'all';
@@ -141,6 +141,20 @@ function startStatsLog(peer, config) {
   }, 3000);
 }
 
+function sendDataChannelPing(channel) {
+  const ping = JSON.stringify({ type: 'ping', t: Date.now() });
+  channel.send(ping);
+  appendLog(`datachannel ping sent payload=${ping}`);
+}
+
+function bindDataChannel(channel, { sendPingOnOpen = false } = {}) {
+  channel.onopen = () => {
+    appendLog(`datachannel open label=${channel.label}`);
+    if (sendPingOnOpen) sendDataChannelPing(channel);
+  };
+  channel.onmessage = (messageEvent) => appendLog(describeDataChannelMessage(messageEvent.data));
+}
+
 async function joinRoom(config) {
   const response = await fetch(`${config.signalBaseUrl}/join/${encodeURIComponent(config.roomId)}`, { method: 'POST' });
   const joined = await response.json();
@@ -171,8 +185,7 @@ async function createPeerConnection(config, sendMessage) {
   peer.ondatachannel = (event) => {
     const channel = event.channel;
     appendLog(`datachannel received label=${channel.label}`);
-    channel.onopen = () => appendLog(`datachannel open label=${channel.label}`);
-    channel.onmessage = (messageEvent) => appendLog(describeDataChannelMessage(messageEvent.data));
+    bindDataChannel(channel, { sendPingOnOpen: true });
   };
 
   configureMedia(peer, config);
@@ -220,19 +233,20 @@ export async function startBrowserProbe() {
   };
 
   const peer = await createPeerConnection(config, sendMessage);
-  let dataChannel;
-  if (config.role === 'offerer') {
-    dataChannel = peer.createDataChannel('stackchan-control');
-    dataChannel.onopen = () => {
-      appendLog('datachannel open label=stackchan-control');
-      const ping = JSON.stringify({ type: 'ping', t: Date.now() });
-      dataChannel.send(ping);
-      appendLog(`datachannel ping sent payload=${ping}`);
-    };
-    dataChannel.onmessage = (event) => appendLog(describeDataChannelMessage(event.data));
-  }
+  // Create a browser-originated DataChannel for both roles. ESP-peer's default
+  // SCTP server role waits for the remote peer's DCEP open, so answerer mode
+  // must not rely only on `ondatachannel`.
+  const dataChannel = peer.createDataChannel('stackchan-control');
+  bindDataChannel(dataChannel, { sendPingOnOpen: true });
 
-  ws = new WebSocket(buildWsUrl(joined.wss_url, config.roomId, joined.client_id));
+  // Use the URL the browser successfully fetched for signaling, not necessarily
+  // the AppRTC-advertised URL. In WSL mirrored/portproxy setups the ESP can use
+  // the LAN address while Windows Chrome must use localhost to reach the same
+  // server.
+  const browserWsBaseUrl = new URL('/ws', config.signalBaseUrl);
+  browserWsBaseUrl.protocol = browserWsBaseUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+  appendLog(`websocket endpoint ${browserWsBaseUrl.toString()}`);
+  ws = new WebSocket(buildWsUrl(browserWsBaseUrl.toString(), config.roomId, joined.client_id));
   ws.onopen = async () => {
     appendLog('websocket open');
     setStatus('signaling connected');

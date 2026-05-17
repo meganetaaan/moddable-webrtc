@@ -14,13 +14,29 @@ config STACKCHAN_WIFI_PASSWORD
 
 config STACKCHAN_SIGNAL_BASE_URL
     string "AppRTC signaling base URL"
-    default "http://192.168.7.135:18090"
+    default "http://192.168.7.135:18091"
     help
         LAN-reachable base URL for src/apprtc-signal.js, without a trailing slash.
 
 config STACKCHAN_SIGNAL_ROOM
     string "AppRTC signaling room"
     default "stackchan"
+
+choice STACKCHAN_PEER_ROLE
+    prompt "WebRTC offerer role"
+    default STACKCHAN_PEER_ROLE_BROWSER_OFFERER
+    help
+        Select which side creates the initial SDP offer. Browser offerer keeps
+        the CoreS3 in the controlled role. ESP offerer lets the CoreS3 create
+        and send the initial offer after the websocket opens.
+
+config STACKCHAN_PEER_ROLE_BROWSER_OFFERER
+    bool "Browser offerer: CoreS3 answers"
+
+config STACKCHAN_PEER_ROLE_ESP_OFFERER
+    bool "ESP offerer: CoreS3 offers"
+
+endchoice
 
 config STACKCHAN_LOG_PAYLOAD_PREFIX
     int "Payload prefix bytes to log"

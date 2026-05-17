@@ -44,6 +44,7 @@ typedef struct {
     esp_peer_handle_t peer;
     bool peer_loop_running;
     bool peer_connected;
+    bool local_offer_started;
     bool audio_task_running;
     uint32_t audio_tx_frames;
     uint32_t audio_tx_bytes;
@@ -186,7 +187,14 @@ static bool bytes_contain(const uint8_t *haystack, size_t haystack_len, const ch
 
 static int peer_msg_callback(esp_peer_msg_t *msg, void *ctx)
 {
-    const char *type = msg->type == ESP_PEER_MSG_TYPE_SDP ? "answer" : "candidate";
+    const char *type = "candidate";
+    if (msg->type == ESP_PEER_MSG_TYPE_SDP) {
+#if CONFIG_STACKCHAN_PEER_ROLE_ESP_OFFERER
+        type = "offer";
+#else
+        type = "answer";
+#endif
+    }
     ESP_LOGI(TAG, "peer on_msg(%s) bytes=%u", type, (unsigned)msg->size);
 
     cJSON *root = cJSON_CreateObject();
@@ -366,6 +374,24 @@ static const char *configured_media_mode(void)
 #endif
 }
 
+static esp_peer_role_t configured_peer_role(void)
+{
+#if CONFIG_STACKCHAN_PEER_ROLE_ESP_OFFERER
+    return ESP_PEER_ROLE_CONTROLLING;
+#else
+    return ESP_PEER_ROLE_CONTROLLED;
+#endif
+}
+
+static const char *configured_peer_role_name(void)
+{
+#if CONFIG_STACKCHAN_PEER_ROLE_ESP_OFFERER
+    return "esp-offerer";
+#else
+    return "browser-offerer";
+#endif
+}
+
 static esp_err_t ensure_peer_open(void)
 {
     if (app.peer) {
@@ -373,7 +399,8 @@ static esp_err_t ensure_peer_open(void)
     }
 
     log_heap("before-peer-open");
-    ESP_LOGI(TAG, "media mode=%s audio_dir=%d video_dir=%d",
+    ESP_LOGI(TAG, "peer role=%s media mode=%s audio_dir=%d video_dir=%d",
+             configured_peer_role_name(),
              configured_media_mode(),
              configured_audio_dir(),
              ESP_PEER_MEDIA_DIR_NONE);
@@ -397,7 +424,7 @@ static esp_err_t ensure_peer_open(void)
     };
 
     esp_peer_cfg_t cfg = {
-        .role = ESP_PEER_ROLE_CONTROLLED,
+        .role = configured_peer_role(),
         .ice_trans_policy = ESP_PEER_ICE_TRANS_POLICY_ALL,
         .audio_info = {
             .codec = ESP_PEER_AUDIO_CODEC_G711A,
@@ -444,6 +471,23 @@ static esp_err_t ensure_peer_open(void)
     return ESP_OK;
 }
 
+static void start_local_offer(void)
+{
+#if CONFIG_STACKCHAN_PEER_ROLE_ESP_OFFERER
+    if (app.local_offer_started) {
+        return;
+    }
+    if (ensure_peer_open() != ESP_OK) {
+        return;
+    }
+    app.local_offer_started = true;
+    log_heap("before-esp_peer_new_connection");
+    int ret = esp_peer_new_connection(app.peer);
+    ESP_LOGI(TAG, "esp_peer_new_connection ret=%d", ret);
+    log_heap("after-esp_peer_new_connection");
+#endif
+}
+
 static void forward_to_peer(const char *type, const char *data, size_t size)
 {
     if (!type || !data || size == 0) {
@@ -452,6 +496,12 @@ static void forward_to_peer(const char *type, const char *data, size_t size)
     }
     if (ensure_peer_open() != ESP_OK) {
         return;
+    }
+    if ((strcmp(type, "offer") == 0 && configured_peer_role() == ESP_PEER_ROLE_CONTROLLING) ||
+        (strcmp(type, "answer") == 0 && configured_peer_role() == ESP_PEER_ROLE_CONTROLLED)) {
+        ESP_LOGW(TAG, "signaling SDP type=%s does not match configured peer role=%s",
+                 type,
+                 configured_peer_role_name());
     }
 
     esp_peer_msg_t msg = {
@@ -503,6 +553,7 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
     switch (event_id) {
     case WEBSOCKET_EVENT_CONNECTED:
         ESP_LOGI(TAG, "websocket open");
+        start_local_offer();
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "websocket close");

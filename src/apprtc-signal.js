@@ -119,7 +119,7 @@ export function isDirectRun(metaUrl = import.meta.url, argv1 = process.argv[1]) 
 
 export function createSignalingServer(options = {}) {
   const {
-    publicBaseUrl = `http://127.0.0.1:${process.env.PORT || 18090}`,
+    publicBaseUrl = `http://127.0.0.1:${process.env.PORT || 18091}`,
     iceServers = DEFAULT_ICE_SERVERS,
   } = options;
   const rooms = new Map();
@@ -286,7 +286,7 @@ export function createSignalingServer(options = {}) {
 }
 
 if (isDirectRun()) {
-  const port = Number.parseInt(process.env.PORT || '18090', 10);
+  const port = Number.parseInt(process.env.PORT || '18091', 10);
   const host = process.env.HOST || '0.0.0.0';
   const publicBaseUrl = process.env.PUBLIC_BASE_URL || `http://127.0.0.1:${port}`;
   const app = createSignalingServer({ publicBaseUrl });

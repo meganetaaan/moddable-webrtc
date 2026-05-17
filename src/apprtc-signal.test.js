@@ -58,7 +58,7 @@ describe('AppRTC-compatible signaling server', () => {
   let baseUrl;
 
   beforeEach(async () => {
-    app = createSignalingServer({ publicBaseUrl: 'http://device-host.test:18090' });
+    app = createSignalingServer({ publicBaseUrl: 'http://device-host.test:18091' });
     baseUrl = await listen(app);
   });
 
@@ -74,9 +74,9 @@ describe('AppRTC-compatible signaling server', () => {
     assert.equal(first.params.room_id, 'stackchan');
     assert.match(first.params.client_id, /^device-/);
     assert.equal(first.params.is_initiator, 'true');
-    assert.equal(first.params.wss_url, 'ws://device-host.test:18090/ws');
-    assert.equal(first.params.wss_post_url, `http://device-host.test:18090/message/stackchan/${first.params.client_id}`);
-    assert.equal(first.params.ice_server_url, 'http://device-host.test:18090/ice');
+    assert.equal(first.params.wss_url, 'ws://device-host.test:18091/ws');
+    assert.equal(first.params.wss_post_url, `http://device-host.test:18091/message/stackchan/${first.params.client_id}`);
+    assert.equal(first.params.ice_server_url, 'http://device-host.test:18091/ice');
     assert.deepEqual(first.params.pc_config, {
       iceServers: [{ urls: ['stun:stun.l.google.com:19302'], username: 'unused', credential: 'unused' }],
     });
@@ -139,7 +139,7 @@ describe('AppRTC-compatible signaling server', () => {
     await waitForOpen(socketB);
 
     const receivedByB = waitForMessage(socketB);
-    const response = await fetch(a.params.wss_post_url.replace('http://device-host.test:18090', baseUrl), {
+    const response = await fetch(a.params.wss_post_url.replace('http://device-host.test:18091', baseUrl), {
       method: 'POST',
       body: JSON.stringify({ type: 'candidate', candidate: 'candidate:1 1 udp ...' }),
     });
@@ -210,7 +210,7 @@ describe('AppRTC-compatible signaling server', () => {
     await receivedOffer;
 
     const receivedCandidate = waitForMessage(socketB);
-    await fetch(a.params.wss_post_url.replace('http://device-host.test:18090', baseUrl), {
+    await fetch(a.params.wss_post_url.replace('http://device-host.test:18091', baseUrl), {
       method: 'POST',
       body: JSON.stringify({ type: 'candidate', candidate: 'candidate:1 1 udp 2122260223 192.0.2.1 54545 typ host generation 0' }),
     });

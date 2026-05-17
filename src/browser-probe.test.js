@@ -13,10 +13,10 @@ import {
 
 describe('browser probe helpers', () => {
   it('parses signaling, room, role, ICE policy, and media from query parameters', () => {
-    const config = parseProbeConfig('?signal=http%3A%2F%2F192.168.7.135%3A18090&room=stackchan&role=answerer&icePolicy=relay&media=audio', 'http://localhost:18090');
+    const config = parseProbeConfig('?signal=http%3A%2F%2F192.168.7.135%3A18091&room=stackchan&role=answerer&icePolicy=relay&media=audio', 'http://localhost:18091');
 
     assert.deepEqual(config, {
-      signalBaseUrl: 'http://192.168.7.135:18090',
+      signalBaseUrl: 'http://192.168.7.135:18091',
       roomId: 'stackchan',
       role: 'answerer',
       iceTransportPolicy: 'relay',
@@ -25,8 +25,8 @@ describe('browser probe helpers', () => {
   });
 
   it('defaults to browser-offerer in the current origin and stackchan room', () => {
-    assert.deepEqual(parseProbeConfig('', 'http://127.0.0.1:18090'), {
-      signalBaseUrl: 'http://127.0.0.1:18090',
+    assert.deepEqual(parseProbeConfig('', 'http://127.0.0.1:18091'), {
+      signalBaseUrl: 'http://127.0.0.1:18091',
       roomId: 'stackchan',
       role: 'offerer',
       iceTransportPolicy: 'all',
@@ -35,7 +35,7 @@ describe('browser probe helpers', () => {
   });
 
   it('ignores unknown media modes', () => {
-    assert.equal(parseProbeConfig('?media=screen', 'http://127.0.0.1:18090').media, 'none');
+    assert.equal(parseProbeConfig('?media=screen', 'http://127.0.0.1:18091').media, 'none');
   });
 
   it('builds raw-candidate AppRTC messages instead of serializing the full RTCIceCandidate object', () => {
@@ -101,8 +101,8 @@ describe('browser probe helpers', () => {
 
   it('builds a room/client websocket URL from the AppRTC join response URL', () => {
     assert.equal(
-      buildWsUrl('ws://192.168.7.135:18090/ws', 'stackchan', 'device-1234'),
-      'ws://192.168.7.135:18090/ws?roomId=stackchan&clientId=device-1234',
+      buildWsUrl('ws://192.168.7.135:18091/ws', 'stackchan', 'device-1234'),
+      'ws://192.168.7.135:18091/ws?roomId=stackchan&clientId=device-1234',
     );
   });
 
