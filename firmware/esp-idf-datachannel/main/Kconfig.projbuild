@@ -45,6 +45,17 @@ config STACKCHAN_LOG_PAYLOAD_PREFIX
     help
         Bounded prefix length for serial logs of signaling payloads.
 
+config STACKCHAN_AGENT_RECV_TIMEOUT_MS
+    int "esp_peer ICE/DTLS agent receive timeout milliseconds"
+    default 1000
+    range 100 5000
+    help
+        Receive timeout passed to esp_peer_default_cfg_t.agent_recv_timeout.
+        Public smartphone relay paths can add enough TURN latency that the
+        previous 100 ms value repeatedly timed out during DTLS handshake after
+        ICE reached connected. Keep this configurable so local LAN runs can be
+        compared against longer relay-friendly values.
+
 choice STACKCHAN_MEDIA_MODE
     prompt "WebRTC media mode"
     default STACKCHAN_MEDIA_AUDIO_TEST_SOURCE

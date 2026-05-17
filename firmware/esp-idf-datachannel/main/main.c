@@ -502,7 +502,7 @@ static esp_err_t ensure_peer_open(void)
 #endif
 
     peer_default_cfg = (esp_peer_default_cfg_t) {
-        .agent_recv_timeout = 100,
+        .agent_recv_timeout = CONFIG_STACKCHAN_AGENT_RECV_TIMEOUT_MS,
         .data_ch_cfg = {
             .recv_cache_size = 1536,
             .send_cache_size = 1536,
@@ -543,6 +543,7 @@ static esp_err_t ensure_peer_open(void)
         .on_channel_close = peer_channel_close_callback,
     };
 
+    ESP_LOGI(TAG, "peer agent_recv_timeout_ms=%u", (unsigned)CONFIG_STACKCHAN_AGENT_RECV_TIMEOUT_MS);
     ESP_LOGI(TAG, "peer ICE server_num=%u first_url=%s",
              (unsigned)cfg.server_num,
              cfg.server_num ? app.ice_url : "(none)");
