@@ -56,6 +56,8 @@ TURN_TTL_SECONDS=86400 \
 npm run start:signaling
 ```
 
+For Metered TURN, create or select a TURN credential in the dashboard, then use the credential's `username` and `password` as `TURN_USERNAME` and `TURN_CREDENTIAL`. The Dashboard Developers `secretKey` is only for server-side credential management; the `/api/v1/turn/credentials` endpoint requires the credential-scoped `apiKey` and returns the ICE servers array. Free accounts may need the `Free Trial Global: 500MB` TURN plan before credential creation and usage APIs are enabled.
+
 Or let the helper choose the first non-loopback IPv4 address and print the exact audio probe URL:
 
 ```bash
