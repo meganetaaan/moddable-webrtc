@@ -42,6 +42,10 @@ typedef struct {
     char client_id[96];
     char wss_url[URL_BUF_SIZE];
     char ws_url[URL_BUF_SIZE];
+    char ice_url[URL_BUF_SIZE];
+    char ice_user[128];
+    char ice_password[128];
+    esp_peer_ice_server_cfg_t ice_servers[1];
     bool is_initiator;
     esp_websocket_client_handle_t ws;
     esp_peer_handle_t peer;
@@ -154,6 +158,47 @@ static bool json_bool_string(cJSON *object, const char *name)
 {
     const char *value = json_string(object, name);
     return value && strcmp(value, "true") == 0;
+}
+
+static const char *json_first_url(cJSON *object, const char *name)
+{
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(object, name);
+    if (cJSON_IsString(item)) {
+        return item->valuestring;
+    }
+    if (cJSON_IsArray(item)) {
+        cJSON *first = cJSON_GetArrayItem(item, 0);
+        if (cJSON_IsString(first)) {
+            return first->valuestring;
+        }
+    }
+    return NULL;
+}
+
+static void parse_first_ice_server(cJSON *params)
+{
+    cJSON *pc_config = cJSON_GetObjectItemCaseSensitive(params, "pc_config");
+    cJSON *ice_servers = cJSON_GetObjectItemCaseSensitive(pc_config, "iceServers");
+    cJSON *first = cJSON_GetArrayItem(ice_servers, 0);
+    const char *url = json_first_url(first, "urls");
+    if (!url) {
+        app.ice_url[0] = '\0';
+        ESP_LOGW(TAG, "join response did not include pc_config.iceServers[0].urls");
+        return;
+    }
+
+    const char *user = json_string(first, "username");
+    const char *credential = json_string(first, "credential");
+    strlcpy(app.ice_url, url, sizeof(app.ice_url));
+    strlcpy(app.ice_user, user ? user : "", sizeof(app.ice_user));
+    strlcpy(app.ice_password, credential ? credential : "", sizeof(app.ice_password));
+    app.ice_servers[0].stun_url = app.ice_url;
+    app.ice_servers[0].user = app.ice_user;
+    app.ice_servers[0].psw = app.ice_password;
+    ESP_LOGI(TAG, "ice server[0] url=%s user_set=%d credential_len=%u",
+             app.ice_url,
+             app.ice_user[0] != '\0',
+             (unsigned)strlen(app.ice_password));
 }
 
 static void send_signaling_json(cJSON *message)
@@ -472,6 +517,8 @@ static esp_err_t ensure_peer_open(void)
     };
 
     esp_peer_cfg_t cfg = {
+        .server_lists = app.ice_url[0] ? app.ice_servers : NULL,
+        .server_num = app.ice_url[0] ? 1 : 0,
         .role = configured_peer_role(),
         .ice_trans_policy = ESP_PEER_ICE_TRANS_POLICY_ALL,
         .audio_info = {
@@ -495,6 +542,10 @@ static esp_err_t ensure_peer_open(void)
         .on_data = peer_data_callback,
         .on_channel_close = peer_channel_close_callback,
     };
+
+    ESP_LOGI(TAG, "peer ICE server_num=%u first_url=%s",
+             (unsigned)cfg.server_num,
+             cfg.server_num ? app.ice_url : "(none)");
 
     int ret = esp_peer_open(&cfg, esp_peer_get_default_impl(), &app.peer);
     ESP_LOGI(TAG, "esp_peer_open ret=%d peer=%p", ret, app.peer);
@@ -658,6 +709,7 @@ static esp_err_t join_room(void)
     strlcpy(app.client_id, client_id, sizeof(app.client_id));
     strlcpy(app.wss_url, wss_url, sizeof(app.wss_url));
     app.is_initiator = json_bool_string(params, "is_initiator");
+    parse_first_ice_server(params);
     ESP_LOGI(TAG, "join room=%s client_id=%s initiator=%d wss_url=%s",
              app.room, app.client_id, app.is_initiator, app.wss_url);
     cJSON_Delete(root);
