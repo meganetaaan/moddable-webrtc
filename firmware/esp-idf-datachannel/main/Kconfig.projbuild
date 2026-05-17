@@ -47,7 +47,7 @@ config STACKCHAN_LOG_PAYLOAD_PREFIX
 
 config STACKCHAN_AGENT_RECV_TIMEOUT_MS
     int "esp_peer ICE/DTLS agent receive timeout milliseconds"
-    default 1000
+    default 5000
     range 100 5000
     help
         Receive timeout passed to esp_peer_default_cfg_t.agent_recv_timeout.
