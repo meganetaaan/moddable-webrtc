@@ -27,6 +27,9 @@
 #define WIFI_FAIL_BIT BIT1
 #define HTTP_BUF_SIZE 8192
 #define URL_BUF_SIZE 512
+#define AUDIO_TEST_SAMPLE_RATE_HZ 8000
+#define AUDIO_TEST_TONE_HZ 440
+#define AUDIO_TEST_TONE_AMPLITUDE 12000
 
 static const char *TAG = "stackchan_dc";
 static EventGroupHandle_t wifi_events;
@@ -315,18 +318,63 @@ static void peer_loop_task(void *arg)
     vTaskDelete(NULL);
 }
 
+static uint8_t linear16_to_alaw(int16_t sample)
+{
+    static const int16_t segment_end[] = {0x001f, 0x003f, 0x007f, 0x00ff, 0x01ff, 0x03ff, 0x07ff, 0x0fff};
+    int16_t pcm = sample >> 3;
+    uint8_t mask;
+
+    if (pcm >= 0) {
+        mask = 0xd5;
+    } else {
+        mask = 0x55;
+        pcm = -pcm - 1;
+    }
+
+    int segment = 0;
+    while (segment < 8 && pcm > segment_end[segment]) {
+        segment++;
+    }
+    if (segment >= 8) {
+        return 0x7f ^ mask;
+    }
+
+    uint8_t encoded = (uint8_t)(segment << 4);
+    if (segment < 2) {
+        encoded |= (pcm >> 1) & 0x0f;
+    } else {
+        encoded |= (pcm >> segment) & 0x0f;
+    }
+    return encoded ^ mask;
+}
+
+static void generate_pcma_tone_frame(uint8_t *frame, size_t frame_size)
+{
+    static uint32_t phase;
+    for (size_t i = 0; i < frame_size; i++) {
+        int16_t sample = phase < (AUDIO_TEST_SAMPLE_RATE_HZ / 2) ? AUDIO_TEST_TONE_AMPLITUDE : -AUDIO_TEST_TONE_AMPLITUDE;
+        frame[i] = linear16_to_alaw(sample);
+        phase += AUDIO_TEST_TONE_HZ;
+        if (phase >= AUDIO_TEST_SAMPLE_RATE_HZ) {
+            phase -= AUDIO_TEST_SAMPLE_RATE_HZ;
+        }
+    }
+}
+
 static void audio_test_task(void *arg)
 {
 #if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
     uint8_t frame[CONFIG_STACKCHAN_AUDIO_TEST_FRAME_BYTES];
-    memset(frame, 0xd5, sizeof(frame));
-    ESP_LOGI(TAG, "audio test source start codec=PCMA sample_rate=8000 channel=1 frame_bytes=%u interval_ms=%u",
+    ESP_LOGI(TAG, "audio test source start codec=PCMA sample_rate=%u channel=1 tone_hz=%u frame_bytes=%u interval_ms=%u",
+             (unsigned)AUDIO_TEST_SAMPLE_RATE_HZ,
+             (unsigned)AUDIO_TEST_TONE_HZ,
              (unsigned)sizeof(frame),
              (unsigned)CONFIG_STACKCHAN_AUDIO_TEST_INTERVAL_MS);
     log_heap("audio-test-start");
 
     while (app.audio_task_running) {
         if (app.peer && app.peer_connected) {
+            generate_pcma_tone_frame(frame, sizeof(frame));
             esp_peer_audio_frame_t audio = {
                 .pts = (uint32_t)(esp_timer_get_time() / 1000),
                 .data = frame,
