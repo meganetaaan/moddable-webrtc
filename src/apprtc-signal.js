@@ -168,7 +168,8 @@ function rememberReplayableMessage(room, senderId, message) {
   }
 }
 
-function replayLatestOffer(room, clientId, socket) {
+function replayLatestOffer(room, clientId, socket, role) {
+  if (role !== 'answerer') return null;
   const latestOffer = room.latestOffer;
   if (!latestOffer || latestOffer.from === clientId) return null;
   const offerer = room.clients.get(latestOffer.from);
@@ -308,7 +309,8 @@ export function createSignalingServer(options = {}) {
     client.socket = socket;
     room.clients.set(id, client);
     recordEvent({ event: 'ws-open', roomId, clientId: id });
-    const replayedOffer = replayLatestOffer(room, id, socket);
+    const replayRole = url.searchParams.get('role');
+    const replayedOffer = replayLatestOffer(room, id, socket, replayRole);
     if (replayedOffer) {
       recordEvent({ event: 'replay', roomId, clientId: id, from: replayedOffer.from, message: summarizeMessage(replayedOffer.message) });
     }

@@ -211,7 +211,9 @@ describe('AppRTC-compatible signaling server', () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
 
     const phone = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
-    const socketPhone = new WebSocket(wsUrl(baseUrl, 'stackchan', phone.params.client_id));
+    const phoneUrl = new URL(wsUrl(baseUrl, 'stackchan', phone.params.client_id));
+    phoneUrl.searchParams.set('role', 'answerer');
+    const socketPhone = new WebSocket(phoneUrl);
     await waitForOpen(socketPhone);
 
     assert.deepEqual(await waitForMessageWithin(socketPhone), {
@@ -231,6 +233,23 @@ describe('AppRTC-compatible signaling server', () => {
 
     socketEsp.close();
     socketPhone.close();
+  });
+
+  it('does not replay an old offer to a later offerer-style client such as a reconnecting CoreS3', async () => {
+    const oldEsp = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const socketOldEsp = new WebSocket(wsUrl(baseUrl, 'stackchan', oldEsp.params.client_id));
+    await waitForOpen(socketOldEsp);
+    socketOldEsp.send(JSON.stringify({ type: 'offer', sdp: 'v=0\r\nold-offer\r\n' }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const newEsp = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const socketNewEsp = new WebSocket(wsUrl(baseUrl, 'stackchan', newEsp.params.client_id));
+    await waitForOpen(socketNewEsp);
+
+    await assert.rejects(waitForMessageWithin(socketNewEsp, 80), /timed out waiting/);
+
+    socketOldEsp.close();
+    socketNewEsp.close();
   });
 
   it('relays messages posted to the advertised HTTP fallback URL', async () => {

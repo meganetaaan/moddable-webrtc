@@ -108,6 +108,13 @@ describe('browser probe helpers', () => {
     );
   });
 
+  it('marks answerer WebSocket URLs as replay-capable without changing firmware URLs', () => {
+    assert.equal(
+      buildWsUrl('wss://stackchan.example/ws', 'stackchan', 'device-phone', { role: 'answerer' }),
+      'wss://stackchan.example/ws?roomId=stackchan&clientId=device-phone&role=answerer',
+    );
+  });
+
   it('summarizes ICE servers for logs without exposing TURN credentials', () => {
     const summary = summarizeIceServers([
       { urls: ['stun:stun.l.google.com:19302'], username: 'unused', credential: 'unused' },
