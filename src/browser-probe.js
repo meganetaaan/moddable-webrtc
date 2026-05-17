@@ -1,4 +1,4 @@
-export function parseProbeConfig(search = globalThis.location?.search ?? '', origin = globalThis.location?.origin ?? 'http://127.0.0.1:18090') {
+export function parseProbeConfig(search = globalThis.location?.search ?? '', origin = globalThis.location?.origin ?? 'http://127.0.0.1:18091') {
   const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
   const role = params.get('role') === 'answerer' ? 'answerer' : 'offerer';
   const iceTransportPolicy = params.get('icePolicy') === 'relay' ? 'relay' : 'all';
@@ -13,10 +13,13 @@ export function parseProbeConfig(search = globalThis.location?.search ?? '', ori
   };
 }
 
-export function buildWsUrl(wssUrl, roomId, clientId) {
+export function buildWsUrl(wssUrl, roomId, clientId, options = {}) {
   const url = new URL(wssUrl);
   url.searchParams.set('roomId', roomId);
   url.searchParams.set('clientId', clientId);
+  if (options.role === 'answerer') {
+    url.searchParams.set('role', 'answerer');
+  }
   return url.toString();
 }
 
@@ -51,11 +54,48 @@ export function normalizeRemoteCandidate(message) {
   return candidate;
 }
 
+export function summarizeCandidate(candidateLine = '') {
+  const value = String(candidateLine);
+  const type = value.match(/ typ ([^ ]+)/)?.[1] ?? 'unknown';
+  const protocol = value.match(/^candidate:[^ ]+ [^ ]+ ([^ ]+)/)?.[1]?.toLowerCase() ?? 'unknown';
+  const address = value.match(/^candidate:[^ ]+ [^ ]+ [^ ]+ [^ ]+ ([^ ]+) ([^ ]+)/);
+  return {
+    type,
+    protocol,
+    address: address ? `${address[1]}:${address[2]}` : 'unknown',
+  };
+}
+
 export function summarizeSdpMedia(sdp = '') {
   return sdp
     .split(/\r?\n/)
     .filter((line) => line.startsWith('m=') || line.startsWith('a=mid:') || line === 'a=sendonly' || line === 'a=recvonly' || line === 'a=sendrecv' || line === 'a=inactive')
     .join(' | ');
+}
+
+function summarizeIceUrl(url) {
+  const value = String(url);
+  const match = value.match(/^([^:]+):(.+)$/);
+  if (!match) {
+    return { scheme: 'unknown', host: 'unknown' };
+  }
+
+  const scheme = match[1].toLowerCase();
+  const withoutQuery = match[2].split('?')[0];
+  const host = withoutQuery.includes('@') ? withoutQuery.slice(withoutQuery.lastIndexOf('@') + 1) : withoutQuery;
+  return { scheme, host: host || 'unknown' };
+}
+
+export function summarizeIceServers(iceServers = []) {
+  const servers = Array.isArray(iceServers) ? iceServers : [];
+  const urls = [];
+  for (const server of servers) {
+    const serverUrls = Array.isArray(server?.urls) ? server.urls : [server?.urls];
+    for (const url of serverUrls) {
+      if (url) urls.push(summarizeIceUrl(url));
+    }
+  }
+  return { count: servers.length, urls };
 }
 
 export function describeDataChannelMessage(data) {
@@ -141,6 +181,20 @@ function startStatsLog(peer, config) {
   }, 3000);
 }
 
+function sendDataChannelPing(channel) {
+  const ping = JSON.stringify({ type: 'ping', t: Date.now() });
+  channel.send(ping);
+  appendLog(`datachannel ping sent payload=${ping}`);
+}
+
+function bindDataChannel(channel, { sendPingOnOpen = false } = {}) {
+  channel.onopen = () => {
+    appendLog(`datachannel open label=${channel.label}`);
+    if (sendPingOnOpen) sendDataChannelPing(channel);
+  };
+  channel.onmessage = (messageEvent) => appendLog(describeDataChannelMessage(messageEvent.data));
+}
+
 async function joinRoom(config) {
   const response = await fetch(`${config.signalBaseUrl}/join/${encodeURIComponent(config.roomId)}`, { method: 'POST' });
   const joined = await response.json();
@@ -153,26 +207,32 @@ async function joinRoom(config) {
 async function createPeerConnection(config, sendMessage) {
   const iceResponse = await fetch(`${config.signalBaseUrl}/ice`);
   const ice = await iceResponse.json();
+  const iceServers = ice.iceServers ?? [];
+  appendLog(`ice policy=${config.iceTransportPolicy} servers=${JSON.stringify(summarizeIceServers(iceServers))}`);
   const peer = new RTCPeerConnection({
-    iceServers: ice.iceServers ?? [],
+    iceServers,
     iceTransportPolicy: config.iceTransportPolicy,
   });
 
   peer.onicecandidate = (event) => {
     const message = buildCandidateMessage(event);
     if (message) {
-      appendLog(`send candidate ${message.candidate.slice(0, 80)}`);
+      appendLog(`send candidate ${JSON.stringify(summarizeCandidate(message.candidate))} ${message.candidate.slice(0, 120)}`);
       sendMessage(message);
+    } else {
+      appendLog('icecandidate end-of-candidates');
     }
   };
   peer.onconnectionstatechange = () => appendLog(`connectionState=${peer.connectionState}`);
   peer.oniceconnectionstatechange = () => appendLog(`iceConnectionState=${peer.iceConnectionState}`);
+  peer.onicegatheringstatechange = () => appendLog(`iceGatheringState=${peer.iceGatheringState}`);
+  peer.onsignalingstatechange = () => appendLog(`signalingState=${peer.signalingState}`);
+  peer.onicecandidateerror = (event) => appendLog(`icecandidateerror url=${event.url ?? 'unknown'} code=${event.errorCode ?? 'unknown'} text=${event.errorText ?? 'unknown'}`);
   peer.ontrack = (event) => attachRemoteTrack(event.track, event.streams);
   peer.ondatachannel = (event) => {
     const channel = event.channel;
     appendLog(`datachannel received label=${channel.label}`);
-    channel.onopen = () => appendLog(`datachannel open label=${channel.label}`);
-    channel.onmessage = (messageEvent) => appendLog(describeDataChannelMessage(messageEvent.data));
+    bindDataChannel(channel, { sendPingOnOpen: true });
   };
 
   configureMedia(peer, config);
@@ -220,19 +280,20 @@ export async function startBrowserProbe() {
   };
 
   const peer = await createPeerConnection(config, sendMessage);
-  let dataChannel;
-  if (config.role === 'offerer') {
-    dataChannel = peer.createDataChannel('stackchan-control');
-    dataChannel.onopen = () => {
-      appendLog('datachannel open label=stackchan-control');
-      const ping = JSON.stringify({ type: 'ping', t: Date.now() });
-      dataChannel.send(ping);
-      appendLog(`datachannel ping sent payload=${ping}`);
-    };
-    dataChannel.onmessage = (event) => appendLog(describeDataChannelMessage(event.data));
-  }
+  // Create a browser-originated DataChannel for both roles. ESP-peer's default
+  // SCTP server role waits for the remote peer's DCEP open, so answerer mode
+  // must not rely only on `ondatachannel`.
+  const dataChannel = peer.createDataChannel('stackchan-control');
+  bindDataChannel(dataChannel, { sendPingOnOpen: true });
 
-  ws = new WebSocket(buildWsUrl(joined.wss_url, config.roomId, joined.client_id));
+  // Use the URL the browser successfully fetched for signaling, not necessarily
+  // the AppRTC-advertised URL. In WSL mirrored/portproxy setups the ESP can use
+  // the LAN address while Windows Chrome must use localhost to reach the same
+  // server.
+  const browserWsBaseUrl = new URL('/ws', config.signalBaseUrl);
+  browserWsBaseUrl.protocol = browserWsBaseUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+  appendLog(`websocket endpoint ${browserWsBaseUrl.toString()}`);
+  ws = new WebSocket(buildWsUrl(browserWsBaseUrl.toString(), config.roomId, joined.client_id, { role: config.role }));
   ws.onopen = async () => {
     appendLog('websocket open');
     setStatus('signaling connected');

@@ -2,14 +2,63 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 
 const ROOT_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
-const DEFAULT_ICE_SERVERS = [
+export const DEFAULT_ICE_SERVERS = [
   { urls: ['stun:stun.l.google.com:19302'], username: 'unused', credential: 'unused' },
 ];
+
+function parseTurnUrls(rawUrls) {
+  if (!rawUrls) return [];
+  return rawUrls
+    .split(',')
+    .map((url) => url.trim())
+    .filter(Boolean)
+    .map((url) => {
+      const match = url.match(/^(turns?):([^/?#]+)(\?[^#]*)?$/i);
+      if (!match) {
+        throw new Error(`Invalid TURN URL: ${url}`);
+      }
+      const host = match[2].includes('@') ? match[2].slice(match[2].lastIndexOf('@') + 1) : match[2];
+      if (!host) {
+        throw new Error(`Invalid TURN URL host: ${url}`);
+      }
+      return url;
+    });
+}
+
+function turnCredentialsFromEnv(env, now = Date.now()) {
+  if (env.TURN_SECRET) {
+    const ttlSeconds = Number.parseInt(env.TURN_TTL_SECONDS || '86400', 10);
+    const expiresAt = Math.floor(now / 1000) + (Number.isFinite(ttlSeconds) && ttlSeconds > 0 ? ttlSeconds : 86400);
+    const username = String(expiresAt);
+    const credential = createHmac('sha1', env.TURN_SECRET).update(username).digest('base64');
+    return { username, credential };
+  }
+
+  if (!env.TURN_USERNAME || !env.TURN_CREDENTIAL) {
+    throw new Error('TURN_USERNAME and TURN_CREDENTIAL, or TURN_SECRET, are required when TURN_URLS is set');
+  }
+  return { username: env.TURN_USERNAME, credential: env.TURN_CREDENTIAL };
+}
+
+export function iceServersFromEnv(env = process.env, now = Date.now()) {
+  const turnUrls = parseTurnUrls(env.TURN_URLS);
+  if (turnUrls.length === 0) {
+    return DEFAULT_ICE_SERVERS;
+  }
+  const turnCredentials = turnCredentialsFromEnv(env, now);
+  return [
+    {
+      urls: turnUrls,
+      ...turnCredentials,
+    },
+    ...DEFAULT_ICE_SERVERS,
+  ];
+}
 
 function json(response, statusCode, body) {
   const payload = JSON.stringify(body);
@@ -51,6 +100,17 @@ function wsUrlFromBase(publicBaseUrl) {
   return url.toString();
 }
 
+function externalBaseUrlForRequest(request, fallbackBaseUrl) {
+  const forwardedProto = request.headers['x-forwarded-proto'];
+  const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+  const forwardedHost = request.headers['x-forwarded-host'];
+  const host = Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost || request.headers.host;
+  if (!host) return fallbackBaseUrl;
+  if (!proto && /^(127\.0\.0\.1|localhost)(:\d+)?$/i.test(host)) return fallbackBaseUrl;
+  const requestProto = proto || 'http';
+  return `${requestProto}://${host}`;
+}
+
 function roomSnapshot(rooms) {
   const snapshot = {};
   for (const [roomId, room] of rooms) {
@@ -58,7 +118,15 @@ function roomSnapshot(rooms) {
       clients: Array.from(room.clients.values(), (client) => ({
         clientId: client.clientId,
         connected: Boolean(client.socket && client.socket.readyState === client.socket.OPEN),
+        role: client.role ?? null,
       })),
+      latestOffer: room.latestOffer
+        ? {
+            from: room.latestOffer.from,
+            state: room.latestOffer.state,
+            claimedBy: room.latestOffer.claimedBy ?? null,
+          }
+        : null,
     };
   }
   return snapshot;
@@ -66,7 +134,7 @@ function roomSnapshot(rooms) {
 
 function ensureRoom(rooms, roomId) {
   if (!rooms.has(roomId)) {
-    rooms.set(roomId, { clients: new Map() });
+    rooms.set(roomId, { clients: new Map(), latestOffer: null });
   }
   return rooms.get(roomId);
 }
@@ -75,6 +143,9 @@ function removeClient(rooms, roomId, clientId) {
   const room = rooms.get(roomId);
   if (!room) return;
   room.clients.delete(clientId);
+  if (room.latestOffer?.from === clientId) {
+    room.latestOffer = null;
+  }
   if (room.clients.size === 0) {
     rooms.delete(roomId);
   }
@@ -98,6 +169,15 @@ function summarizeMessage(message) {
   return { type: message.type ?? 'unknown' };
 }
 
+function offerHasMediaSections(message) {
+  if (message?.type !== 'offer' || typeof message.sdp !== 'string') return true;
+  return /^m=(audio|video|application)\s/m.test(message.sdp);
+}
+
+function shouldRelayMessage(message) {
+  return offerHasMediaSections(message);
+}
+
 function relayMessage(room, senderId, message) {
   let delivered = 0;
   const outbound = JSON.stringify({ from: senderId, message });
@@ -110,6 +190,57 @@ function relayMessage(room, senderId, message) {
   return delivered;
 }
 
+function sendMessageToClient(room, senderId, recipientId, message) {
+  const recipient = room.clients.get(recipientId);
+  if (!recipient?.socket || recipient.socket.readyState !== recipient.socket.OPEN) {
+    return false;
+  }
+  recipient.socket.send(JSON.stringify({ from: senderId, message }));
+  return true;
+}
+
+function rememberReplayableMessage(room, senderId, message) {
+  if (message?.type === 'offer' && offerHasMediaSections(message)) {
+    room.latestOffer = { from: senderId, message, state: 'fresh', claimedBy: null };
+  }
+}
+
+function consumeReplayableOffer(room, answererId) {
+  const latestOffer = room.latestOffer;
+  if (!latestOffer || latestOffer.state === 'consumed') return null;
+  latestOffer.state = 'consumed';
+  latestOffer.claimedBy = latestOffer.claimedBy ?? answererId;
+  return latestOffer;
+}
+
+function findConnectedOfferer(room) {
+  if (room.latestOffer?.from) {
+    const latestOfferer = room.clients.get(room.latestOffer.from);
+    if (latestOfferer?.socket && latestOfferer.socket.readyState === latestOfferer.socket.OPEN) {
+      return latestOfferer;
+    }
+  }
+  return Array.from(room.clients.values()).find((client) =>
+    client.role !== 'answerer' && client.socket && client.socket.readyState === client.socket.OPEN
+  ) ?? null;
+}
+
+function replayLatestOffer(room, clientId, socket, role) {
+  if (role !== 'answerer') return null;
+  const latestOffer = room.latestOffer;
+  if (!latestOffer || latestOffer.from === clientId) return null;
+  if (latestOffer.state !== 'fresh') return null;
+  const offerer = room.clients.get(latestOffer.from);
+  if (!offerer?.socket || offerer.socket.readyState !== offerer.socket.OPEN) {
+    room.latestOffer = null;
+    return null;
+  }
+  socket.send(JSON.stringify({ from: latestOffer.from, message: latestOffer.message }));
+  latestOffer.state = 'claimed';
+  latestOffer.claimedBy = clientId;
+  return latestOffer;
+}
+
 export function isDirectRun(metaUrl = import.meta.url, argv1 = process.argv[1]) {
   if (!argv1) return false;
   const modulePath = fileURLToPath(metaUrl);
@@ -118,10 +249,8 @@ export function isDirectRun(metaUrl = import.meta.url, argv1 = process.argv[1]) 
 }
 
 export function createSignalingServer(options = {}) {
-  const {
-    publicBaseUrl = `http://127.0.0.1:${process.env.PORT || 18090}`,
-    iceServers = DEFAULT_ICE_SERVERS,
-  } = options;
+  const publicBaseUrl = options.publicBaseUrl ?? `http://127.0.0.1:${process.env.PORT || 18091}`;
+  const iceServers = options.iceServers ?? iceServersFromEnv(options.env ?? process.env);
   const rooms = new Map();
   const events = [];
 
@@ -147,6 +276,7 @@ export function createSignalingServer(options = {}) {
       room.clients.set(id, { clientId: id, socket: null });
       recordEvent({ event: 'join', roomId, clientId: id, initiator: isInitiator });
 
+      const responseBaseUrl = externalBaseUrlForRequest(request, publicBaseUrl);
       json(response, 200, {
         result: 'SUCCESS',
         params: {
@@ -154,9 +284,9 @@ export function createSignalingServer(options = {}) {
           client_id: id,
           is_initiator: String(isInitiator),
           messages: [],
-          wss_url: wsUrlFromBase(publicBaseUrl),
-          wss_post_url: `${publicBaseUrl}/message/${encodeURIComponent(roomId)}/${id}`,
-          ice_server_url: `${publicBaseUrl}/ice`,
+          wss_url: wsUrlFromBase(responseBaseUrl),
+          wss_post_url: `${responseBaseUrl}/message/${encodeURIComponent(roomId)}/${id}`,
+          ice_server_url: `${responseBaseUrl}/ice`,
           pc_config: { iceServers },
         },
       });
@@ -196,6 +326,18 @@ export function createSignalingServer(options = {}) {
       try {
         const message = JSON.parse(body);
         recordEvent({ event: 'message', roomId, clientId, transport: 'http', message: summarizeMessage(message) });
+        if (!shouldRelayMessage(message)) {
+          recordEvent({ event: 'ignore', roomId, clientId, transport: 'http', reason: 'offer-without-media', message: summarizeMessage(message) });
+          json(response, 200, { result: 'SUCCESS', ignored: true });
+          return;
+        }
+        rememberReplayableMessage(room, clientId, message);
+        if (message?.type === 'answer') {
+          const consumed = consumeReplayableOffer(room, clientId);
+          if (consumed) {
+            recordEvent({ event: 'offer-consumed', roomId, clientId, from: consumed.from });
+          }
+        }
         const delivered = relayMessage(room, clientId, message);
         recordEvent({ event: 'relay', roomId, clientId, transport: 'http', delivered });
       } catch {
@@ -237,8 +379,20 @@ export function createSignalingServer(options = {}) {
     const room = ensureRoom(rooms, roomId);
     const client = room.clients.get(id) ?? { clientId: id, socket: null };
     client.socket = socket;
+    client.role = url.searchParams.get('role') || 'offerer';
     room.clients.set(id, client);
-    recordEvent({ event: 'ws-open', roomId, clientId: id });
+    recordEvent({ event: 'ws-open', roomId, clientId: id, role: client.role });
+    const replayRole = url.searchParams.get('role');
+    const replayedOffer = replayLatestOffer(room, id, socket, replayRole);
+    if (replayedOffer) {
+      recordEvent({ event: 'replay', roomId, clientId: id, from: replayedOffer.from, message: summarizeMessage(replayedOffer.message) });
+    } else if (replayRole === 'answerer') {
+      const offerer = findConnectedOfferer(room);
+      if (offerer && offerer.clientId !== id) {
+        const delivered = sendMessageToClient(room, id, offerer.clientId, { type: 'reoffer-request', reason: 'no-fresh-offer' });
+        recordEvent({ event: 'reoffer-request', roomId, clientId: id, to: offerer.clientId, delivered });
+      }
+    }
 
     socket.on('message', (data) => {
       let message;
@@ -250,6 +404,17 @@ export function createSignalingServer(options = {}) {
       }
 
       recordEvent({ event: 'message', roomId, clientId: id, transport: 'websocket', message: summarizeMessage(message) });
+      if (!shouldRelayMessage(message)) {
+        recordEvent({ event: 'ignore', roomId, clientId: id, transport: 'websocket', reason: 'offer-without-media', message: summarizeMessage(message) });
+        return;
+      }
+      rememberReplayableMessage(room, id, message);
+      if (message?.type === 'answer') {
+        const consumed = consumeReplayableOffer(room, id);
+        if (consumed) {
+          recordEvent({ event: 'offer-consumed', roomId, clientId: id, from: consumed.from });
+        }
+      }
       const delivered = relayMessage(room, id, message);
       recordEvent({ event: 'relay', roomId, clientId: id, transport: 'websocket', delivered });
     });
@@ -267,16 +432,17 @@ export function createSignalingServer(options = {}) {
     server,
     close: async () => {
       for (const socket of websocketServer.clients) {
-        socket.close();
+        socket.terminate();
       }
+      server.closeAllConnections?.();
       await new Promise((resolve, reject) => {
-        server.close((error) => {
+        websocketServer.close((error) => {
           if (error) reject(error);
           else resolve();
         });
       });
       await new Promise((resolve, reject) => {
-        websocketServer.close((error) => {
+        server.close((error) => {
           if (error) reject(error);
           else resolve();
         });
@@ -286,7 +452,7 @@ export function createSignalingServer(options = {}) {
 }
 
 if (isDirectRun()) {
-  const port = Number.parseInt(process.env.PORT || '18090', 10);
+  const port = Number.parseInt(process.env.PORT || '18091', 10);
   const host = process.env.HOST || '0.0.0.0';
   const publicBaseUrl = process.env.PUBLIC_BASE_URL || `http://127.0.0.1:${port}`;
   const app = createSignalingServer({ publicBaseUrl });
