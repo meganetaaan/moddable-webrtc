@@ -8,6 +8,7 @@ import {
   describeDataChannelMessage,
   normalizeRemoteCandidate,
   parseProbeConfig,
+  summarizeIceServers,
   summarizeSdpMedia,
 } from './browser-probe.js';
 
@@ -104,6 +105,27 @@ describe('browser probe helpers', () => {
       buildWsUrl('ws://192.168.7.135:18091/ws', 'stackchan', 'device-1234'),
       'ws://192.168.7.135:18091/ws?roomId=stackchan&clientId=device-1234',
     );
+  });
+
+  it('summarizes ICE servers for logs without exposing TURN credentials', () => {
+    const summary = summarizeIceServers([
+      { urls: ['stun:stun.l.google.com:19302'], username: 'unused', credential: 'unused' },
+      {
+        urls: ['turn:turn.example.com:3478?transport=udp', 'turns:secret-user:secret-pass@turn.example.com:5349?transport=tcp'],
+        username: 'turn-user',
+        credential: 'turn-secret',
+      },
+    ]);
+
+    assert.equal(summary.count, 2);
+    assert.deepEqual(summary.urls, [
+      { scheme: 'stun', host: 'stun.l.google.com:19302' },
+      { scheme: 'turn', host: 'turn.example.com:3478' },
+      { scheme: 'turns', host: 'turn.example.com:5349' },
+    ]);
+    assert.equal(JSON.stringify(summary).includes('turn-user'), false);
+    assert.equal(JSON.stringify(summary).includes('turn-secret'), false);
+    assert.equal(JSON.stringify(summary).includes('secret-pass'), false);
   });
 
   it('labels DataChannel pong payloads as decisive evidence', () => {

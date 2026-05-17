@@ -56,6 +56,16 @@
       Query parameters:
       <code>?signal=http://192.168.7.135:18091&amp;room=stackchan&amp;role=offerer&amp;icePolicy=all&amp;media=audio</code>
     </p>
+    <p>
+      Smartphone relay check through a Cloudflare Tunnel:
+      <code>https://stackchan.example.trycloudflare.com/probe?signal=https://stackchan.example.trycloudflare.com&amp;room=stackchan&amp;role=answerer&amp;icePolicy=relay&amp;media=audio</code>
+    </p>
+    <p>
+      Configure TURN on the signaling server with
+      <code>TURN_URLS=turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349?transport=tcp</code>,
+      plus either <code>TURN_USERNAME</code> and <code>TURN_CREDENTIAL</code>, or coturn REST-style <code>TURN_SECRET</code>.
+      The probe log shows relay policy and redacted ICE server schemes/hosts only.
+    </p>
     <button id="start" type="button">Start probe</button>
     <p>Status: <strong id="status">idle</strong></p>
     <audio id="remoteAudio" controls autoplay></audio>

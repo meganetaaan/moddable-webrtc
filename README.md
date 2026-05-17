@@ -34,6 +34,26 @@ PORT=18091 \
 npm run start:signaling
 ```
 
+For external smartphone checks, expose the same signaling server through a Cloudflare Tunnel and configure TURN relay credentials on the server. `TURN_URLS` is comma-separated and may contain `turn:` and `turns:` URLs. If `TURN_URLS` is unset, `/ice` keeps the default STUN-only response. Use `TURN_USERNAME`/`TURN_CREDENTIAL` for long-term credentials, or `TURN_SECRET` for coturn REST-style time-limited credentials.
+
+```bash
+PUBLIC_BASE_URL=https://stackchan.example.trycloudflare.com \
+TURN_URLS='turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349?transport=tcp' \
+TURN_USERNAME='example-user' \
+TURN_CREDENTIAL='example-secret' \
+npm run start:signaling
+```
+
+For coturn static-auth-secret / TURN REST API style credentials:
+
+```bash
+PUBLIC_BASE_URL=https://stackchan.example.trycloudflare.com \
+TURN_URLS='turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349?transport=tcp' \
+TURN_SECRET='example-shared-secret' \
+TURN_TTL_SECONDS=86400 \
+npm run start:signaling
+```
+
 Or let the helper choose the first non-loopback IPv4 address and print the exact audio probe URL:
 
 ```bash
@@ -84,6 +104,12 @@ For CoreS3/Stack-chan LAN checks, use the Windows/LAN host address that the devi
 http://192.168.7.135:18091/probe?signal=http://192.168.7.135:18091&room=stackchan&role=offerer&icePolicy=all&media=audio
 ```
 
+For smartphone relay checks through the tunnel, force relay candidates and point the probe at the public signaling URL:
+
+```text
+https://stackchan.example.trycloudflare.com/probe?signal=https://stackchan.example.trycloudflare.com&room=stackchan&role=answerer&icePolicy=relay&media=audio
+```
+
 The probe joins the room, opens `/ws`, creates a DataChannel in browser-offerer mode, optionally adds one `recvonly` media transceiver with `media=audio` or `media=video`, sends an SDP offer, and sends ICE candidates as raw candidate lines in AppRTC-style messages:
 
 ```json
@@ -96,6 +122,8 @@ The probe joins the room, opens `/ws`, creates a DataChannel in browser-offerer 
 ```
 
 For the ESP-offerer firmware mode, open the same URL with `role=answerer`; the browser will answer the CoreS3 SDP offer, open a browser-originated DataChannel, send a ping, and log the CoreS3 pong.
+
+When `/ice` includes TURN credentials, the browser probe logs only the ICE policy plus URL schemes and hosts. It does not print TURN usernames or credentials.
 
 This keeps the next boundary narrow:
 

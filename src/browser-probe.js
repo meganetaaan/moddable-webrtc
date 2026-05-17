@@ -58,6 +58,31 @@ export function summarizeSdpMedia(sdp = '') {
     .join(' | ');
 }
 
+function summarizeIceUrl(url) {
+  const value = String(url);
+  const match = value.match(/^([^:]+):(.+)$/);
+  if (!match) {
+    return { scheme: 'unknown', host: 'unknown' };
+  }
+
+  const scheme = match[1].toLowerCase();
+  const withoutQuery = match[2].split('?')[0];
+  const host = withoutQuery.includes('@') ? withoutQuery.slice(withoutQuery.lastIndexOf('@') + 1) : withoutQuery;
+  return { scheme, host: host || 'unknown' };
+}
+
+export function summarizeIceServers(iceServers = []) {
+  const servers = Array.isArray(iceServers) ? iceServers : [];
+  const urls = [];
+  for (const server of servers) {
+    const serverUrls = Array.isArray(server?.urls) ? server.urls : [server?.urls];
+    for (const url of serverUrls) {
+      if (url) urls.push(summarizeIceUrl(url));
+    }
+  }
+  return { count: servers.length, urls };
+}
+
 export function describeDataChannelMessage(data) {
   if (typeof data !== 'string') {
     return `datachannel message bytes=${data?.byteLength ?? data?.size ?? 'unknown'}`;
@@ -167,8 +192,10 @@ async function joinRoom(config) {
 async function createPeerConnection(config, sendMessage) {
   const iceResponse = await fetch(`${config.signalBaseUrl}/ice`);
   const ice = await iceResponse.json();
+  const iceServers = ice.iceServers ?? [];
+  appendLog(`ice policy=${config.iceTransportPolicy} servers=${JSON.stringify(summarizeIceServers(iceServers))}`);
   const peer = new RTCPeerConnection({
-    iceServers: ice.iceServers ?? [],
+    iceServers,
     iceTransportPolicy: config.iceTransportPolicy,
   });
 

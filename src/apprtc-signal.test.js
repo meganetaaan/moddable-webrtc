@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import WebSocket from 'ws';
 
-import { createSignalingServer, isDirectRun } from './apprtc-signal.js';
+import { createSignalingServer, iceServersFromEnv, isDirectRun } from './apprtc-signal.js';
 
 async function readJson(response) {
   return JSON.parse(await response.text());
@@ -93,6 +93,68 @@ describe('AppRTC-compatible signaling server', () => {
     assert.deepEqual(ice.iceServers, [
       { urls: ['stun:stun.l.google.com:19302'], username: 'unused', credential: 'unused' },
     ]);
+  });
+
+  it('adds TURN servers from environment config while preserving the default STUN server', async () => {
+    await app.close();
+    app = createSignalingServer({
+      publicBaseUrl: 'http://device-host.test:18091',
+      env: {
+        TURN_URLS: 'turn:turn.example.com:3478?transport=udp, turns:turn.example.com:5349?transport=tcp',
+        TURN_USERNAME: 'test-user',
+        TURN_CREDENTIAL: 'test-secret',
+      },
+    });
+    baseUrl = await listen(app);
+
+    const ice = await readJson(await fetch(`${baseUrl}/ice`));
+
+    assert.deepEqual(ice, {
+      result: 'SUCCESS',
+      iceServers: [
+        { urls: ['stun:stun.l.google.com:19302'], username: 'unused', credential: 'unused' },
+        {
+          urls: ['turn:turn.example.com:3478?transport=udp', 'turns:turn.example.com:5349?transport=tcp'],
+          username: 'test-user',
+          credential: 'test-secret',
+        },
+      ],
+    });
+  });
+
+  it('uses the same TURN ICE config in join pc_config and /ice', async () => {
+    await app.close();
+    app = createSignalingServer({
+      publicBaseUrl: 'http://device-host.test:18091',
+      env: {
+        TURN_URLS: 'turn:relay.test:3478?transport=udp',
+        TURN_USERNAME: 'join-user',
+        TURN_CREDENTIAL: 'join-secret',
+      },
+    });
+    baseUrl = await listen(app);
+
+    const ice = await readJson(await fetch(`${baseUrl}/ice`));
+    const joined = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+
+    assert.deepEqual(joined.params.pc_config.iceServers, ice.iceServers);
+  });
+
+  it('can derive coturn REST-style time-limited credentials from TURN_SECRET', () => {
+    const iceServers = iceServersFromEnv(
+      {
+        TURN_URLS: 'turn:staticauth.openrelay.metered.ca:80?transport=udp',
+        TURN_SECRET: 'openrelayprojectsecret',
+        TURN_TTL_SECONDS: '60',
+      },
+      1_770_000_000_000,
+    );
+
+    assert.deepEqual(iceServers[1], {
+      urls: ['turn:staticauth.openrelay.metered.ca:80?transport=udp'],
+      username: '1770000060',
+      credential: 'ayJEUjsOg9J0J39G4Qncq7CqZlY=',
+    });
   });
 
   it('serves a tiny reachability ping for firmware TCP/HTTP checks', async () => {

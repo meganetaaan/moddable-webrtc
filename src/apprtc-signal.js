@@ -2,14 +2,63 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 
 const ROOT_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
-const DEFAULT_ICE_SERVERS = [
+export const DEFAULT_ICE_SERVERS = [
   { urls: ['stun:stun.l.google.com:19302'], username: 'unused', credential: 'unused' },
 ];
+
+function parseTurnUrls(rawUrls) {
+  if (!rawUrls) return [];
+  return rawUrls
+    .split(',')
+    .map((url) => url.trim())
+    .filter(Boolean)
+    .map((url) => {
+      const match = url.match(/^(turns?):([^/?#]+)(\?[^#]*)?$/i);
+      if (!match) {
+        throw new Error(`Invalid TURN URL: ${url}`);
+      }
+      const host = match[2].includes('@') ? match[2].slice(match[2].lastIndexOf('@') + 1) : match[2];
+      if (!host) {
+        throw new Error(`Invalid TURN URL host: ${url}`);
+      }
+      return url;
+    });
+}
+
+function turnCredentialsFromEnv(env, now = Date.now()) {
+  if (env.TURN_SECRET) {
+    const ttlSeconds = Number.parseInt(env.TURN_TTL_SECONDS || '86400', 10);
+    const expiresAt = Math.floor(now / 1000) + (Number.isFinite(ttlSeconds) && ttlSeconds > 0 ? ttlSeconds : 86400);
+    const username = String(expiresAt);
+    const credential = createHmac('sha1', env.TURN_SECRET).update(username).digest('base64');
+    return { username, credential };
+  }
+
+  if (!env.TURN_USERNAME || !env.TURN_CREDENTIAL) {
+    throw new Error('TURN_USERNAME and TURN_CREDENTIAL, or TURN_SECRET, are required when TURN_URLS is set');
+  }
+  return { username: env.TURN_USERNAME, credential: env.TURN_CREDENTIAL };
+}
+
+export function iceServersFromEnv(env = process.env, now = Date.now()) {
+  const turnUrls = parseTurnUrls(env.TURN_URLS);
+  if (turnUrls.length === 0) {
+    return DEFAULT_ICE_SERVERS;
+  }
+  const turnCredentials = turnCredentialsFromEnv(env, now);
+  return [
+    ...DEFAULT_ICE_SERVERS,
+    {
+      urls: turnUrls,
+      ...turnCredentials,
+    },
+  ];
+}
 
 function json(response, statusCode, body) {
   const payload = JSON.stringify(body);
@@ -118,10 +167,8 @@ export function isDirectRun(metaUrl = import.meta.url, argv1 = process.argv[1]) 
 }
 
 export function createSignalingServer(options = {}) {
-  const {
-    publicBaseUrl = `http://127.0.0.1:${process.env.PORT || 18091}`,
-    iceServers = DEFAULT_ICE_SERVERS,
-  } = options;
+  const publicBaseUrl = options.publicBaseUrl ?? `http://127.0.0.1:${process.env.PORT || 18091}`;
+  const iceServers = options.iceServers ?? iceServersFromEnv(options.env ?? process.env);
   const rooms = new Map();
   const events = [];
 
