@@ -115,7 +115,7 @@ function roomSnapshot(rooms) {
 
 function ensureRoom(rooms, roomId) {
   if (!rooms.has(roomId)) {
-    rooms.set(roomId, { clients: new Map() });
+    rooms.set(roomId, { clients: new Map(), latestOffer: null });
   }
   return rooms.get(roomId);
 }
@@ -124,6 +124,9 @@ function removeClient(rooms, roomId, clientId) {
   const room = rooms.get(roomId);
   if (!room) return;
   room.clients.delete(clientId);
+  if (room.latestOffer?.from === clientId) {
+    room.latestOffer = null;
+  }
   if (room.clients.size === 0) {
     rooms.delete(roomId);
   }
@@ -157,6 +160,24 @@ function relayMessage(room, senderId, message) {
     }
   }
   return delivered;
+}
+
+function rememberReplayableMessage(room, senderId, message) {
+  if (message?.type === 'offer') {
+    room.latestOffer = { from: senderId, message };
+  }
+}
+
+function replayLatestOffer(room, clientId, socket) {
+  const latestOffer = room.latestOffer;
+  if (!latestOffer || latestOffer.from === clientId) return null;
+  const offerer = room.clients.get(latestOffer.from);
+  if (!offerer?.socket || offerer.socket.readyState !== offerer.socket.OPEN) {
+    room.latestOffer = null;
+    return null;
+  }
+  socket.send(JSON.stringify({ from: latestOffer.from, message: latestOffer.message }));
+  return latestOffer;
 }
 
 export function isDirectRun(metaUrl = import.meta.url, argv1 = process.argv[1]) {
@@ -243,6 +264,7 @@ export function createSignalingServer(options = {}) {
       try {
         const message = JSON.parse(body);
         recordEvent({ event: 'message', roomId, clientId, transport: 'http', message: summarizeMessage(message) });
+        rememberReplayableMessage(room, clientId, message);
         const delivered = relayMessage(room, clientId, message);
         recordEvent({ event: 'relay', roomId, clientId, transport: 'http', delivered });
       } catch {
@@ -286,6 +308,10 @@ export function createSignalingServer(options = {}) {
     client.socket = socket;
     room.clients.set(id, client);
     recordEvent({ event: 'ws-open', roomId, clientId: id });
+    const replayedOffer = replayLatestOffer(room, id, socket);
+    if (replayedOffer) {
+      recordEvent({ event: 'replay', roomId, clientId: id, from: replayedOffer.from, message: summarizeMessage(replayedOffer.message) });
+    }
 
     socket.on('message', (data) => {
       let message;
@@ -297,6 +323,7 @@ export function createSignalingServer(options = {}) {
       }
 
       recordEvent({ event: 'message', roomId, clientId: id, transport: 'websocket', message: summarizeMessage(message) });
+      rememberReplayableMessage(room, id, message);
       const delivered = relayMessage(room, id, message);
       recordEvent({ event: 'relay', roomId, clientId: id, transport: 'websocket', delivered });
     });

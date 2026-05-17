@@ -36,6 +36,8 @@ npm run start:signaling
 
 For external smartphone checks, expose the same signaling server through a Cloudflare Tunnel and configure TURN relay credentials on the server. `TURN_URLS` is comma-separated and may contain `turn:` and `turns:` URLs. If `TURN_URLS` is unset, `/ice` keeps the default STUN-only response. Use `TURN_USERNAME`/`TURN_CREDENTIAL` for long-term credentials, or `TURN_SECRET` for coturn REST-style time-limited credentials. If a phone logs `icecandidateerror ... code=701 ... host lookup`, emit IP-literal `turn:` URLs for that test run to bypass the phone/network DNS failure; avoid IP-literal `turns:` because TLS certificate names will not match.
 
+The signaling server retains the latest connected offerer's `offer` in each room and replays it to later WebSocket clients. This lets a phone refresh or rejoin `role=answerer` after the CoreS3 is already waiting, without resetting the CoreS3 just to generate a fresh offer. The retained offer is discarded when the offerer's WebSocket closes.
+
 ```bash
 PUBLIC_BASE_URL=https://stackchan.example.trycloudflare.com \
 TURN_URLS='turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349?transport=tcp' \

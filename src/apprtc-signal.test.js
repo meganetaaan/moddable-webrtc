@@ -47,6 +47,13 @@ function waitForMessage(socket) {
   });
 }
 
+function waitForMessageWithin(socket, milliseconds = 300) {
+  return Promise.race([
+    waitForMessage(socket),
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out waiting for websocket message after ${milliseconds}ms`)), milliseconds)),
+  ]);
+}
+
 describe('AppRTC-compatible signaling server', () => {
   it('detects direct CLI execution when Node receives a relative script path', () => {
     assert.equal(isDirectRun(new URL('./apprtc-signal.js', import.meta.url).href, 'src/apprtc-signal.js'), true);
@@ -192,6 +199,38 @@ describe('AppRTC-compatible signaling server', () => {
     socketA.close();
     socketB.close();
     socketOther.close();
+  });
+
+  it('replays the latest offer to an answerer that joins after the ESP offerer is already waiting', async () => {
+    const esp = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const socketEsp = new WebSocket(wsUrl(baseUrl, 'stackchan', esp.params.client_id));
+    await waitForOpen(socketEsp);
+
+    const offer = { type: 'offer', sdp: 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n' };
+    socketEsp.send(JSON.stringify(offer));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const phone = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const socketPhone = new WebSocket(wsUrl(baseUrl, 'stackchan', phone.params.client_id));
+    await waitForOpen(socketPhone);
+
+    assert.deepEqual(await waitForMessageWithin(socketPhone), {
+      from: esp.params.client_id,
+      message: offer,
+    });
+
+    const receivedAnswer = waitForMessage(socketEsp);
+    socketPhone.send(JSON.stringify({ type: 'answer', sdp: 'v=0\r\na=setup:active\r\n' }));
+    assert.deepEqual(await receivedAnswer, {
+      from: phone.params.client_id,
+      message: { type: 'answer', sdp: 'v=0\r\na=setup:active\r\n' },
+    });
+
+    const { events } = await readJson(await fetch(`${baseUrl}/debug/events`));
+    assert.ok(events.some((event) => event.event === 'replay' && event.clientId === phone.params.client_id && event.from === esp.params.client_id));
+
+    socketEsp.close();
+    socketPhone.close();
   });
 
   it('relays messages posted to the advertised HTTP fallback URL', async () => {

@@ -68,6 +68,11 @@
       <code>icecandidateerror ... code=701 ... host lookup</code>, retry with IP-literal <code>turn:</code> URLs
       for that test run; avoid IP-literal <code>turns:</code> because TLS certificate names will not match.
     </p>
+    <p>
+      The signaling room replays the latest connected offerer's offer to later answerer clients, so a
+      refreshed smartphone probe can rejoin without resetting the CoreS3 only to generate a new offer.
+      Close older probe tabs if you want a strict one-phone check.
+    </p>
     <button id="start" type="button">Start probe</button>
     <p>Status: <strong id="status">idle</strong></p>
     <audio id="remoteAudio" controls autoplay></audio>
