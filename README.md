@@ -36,7 +36,9 @@ npm run start:signaling
 
 For external smartphone checks, expose the same signaling server through a Cloudflare Tunnel and configure TURN relay credentials on the server. `TURN_URLS` is comma-separated and may contain `turn:` and `turns:` URLs. If `TURN_URLS` is unset, `/ice` keeps the default STUN-only response. When `TURN_URLS` is set, the signaling server returns TURN before the default STUN entry because the CoreS3 AppRTC firmware path only consumes the first ICE server URL. Use `TURN_USERNAME`/`TURN_CREDENTIAL` for long-term credentials, or `TURN_SECRET` for coturn REST-style time-limited credentials. If a phone logs `icecandidateerror ... code=701 ... host lookup`, emit IP-literal `turn:` URLs for that test run to bypass the phone/network DNS failure; avoid IP-literal `turns:` because TLS certificate names will not match.
 
-The signaling server retains the latest connected offerer's `offer` in each room and replays it to later WebSocket clients. This lets a phone refresh or rejoin `role=answerer` after the CoreS3 is already waiting, without resetting the CoreS3 just to generate a fresh offer. The retained offer is discarded when the offerer's WebSocket closes.
+The signaling server retains only the latest fresh connected offerer's `offer` in each room and replays it once to a later `role=answerer` WebSocket client. When an answer arrives, that offer is marked consumed and is not replayed to another phone. If a later answerer joins without a fresh offer, the server sends `{ "type": "reoffer-request", "reason": "no-fresh-offer" }` to the connected offerer so firmware can close the stale peer and publish a new offer.
+
+When the server is reached through both LAN and a Cloudflare Tunnel, `/join` advertises WebSocket and HTTP fallback URLs from the request host/forwarded headers. That keeps CoreS3 on plain LAN `ws://<lan-ip>:18091/ws` while phones that arrive through the tunnel receive `wss://<tunnel-host>/ws`.
 
 ```bash
 PUBLIC_BASE_URL=https://stackchan.example.trycloudflare.com \

@@ -69,9 +69,9 @@
       for that test run; avoid IP-literal <code>turns:</code> because TLS certificate names will not match.
     </p>
     <p>
-      The signaling room replays the latest connected offerer's offer to later answerer clients, so a
-      refreshed smartphone probe can rejoin without resetting the CoreS3 only to generate a new offer.
-      Close older probe tabs if you want a strict one-phone check.
+      The signaling room replays only one fresh connected offerer's offer to an answerer. After an
+      answer consumes that offer, later answerers trigger a <code>reoffer-request</code> so the CoreS3 can
+      close the stale peer and publish a new offer.
     </p>
     <button id="start" type="button">Start probe</button>
     <p>Status: <strong id="status">idle</strong></p>

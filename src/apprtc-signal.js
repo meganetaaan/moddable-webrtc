@@ -100,6 +100,17 @@ function wsUrlFromBase(publicBaseUrl) {
   return url.toString();
 }
 
+function externalBaseUrlForRequest(request, fallbackBaseUrl) {
+  const forwardedProto = request.headers['x-forwarded-proto'];
+  const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+  const forwardedHost = request.headers['x-forwarded-host'];
+  const host = Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost || request.headers.host;
+  if (!host) return fallbackBaseUrl;
+  if (!proto && /^(127\.0\.0\.1|localhost)(:\d+)?$/i.test(host)) return fallbackBaseUrl;
+  const requestProto = proto || 'http';
+  return `${requestProto}://${host}`;
+}
+
 function roomSnapshot(rooms) {
   const snapshot = {};
   for (const [roomId, room] of rooms) {
@@ -107,7 +118,15 @@ function roomSnapshot(rooms) {
       clients: Array.from(room.clients.values(), (client) => ({
         clientId: client.clientId,
         connected: Boolean(client.socket && client.socket.readyState === client.socket.OPEN),
+        role: client.role ?? null,
       })),
+      latestOffer: room.latestOffer
+        ? {
+            from: room.latestOffer.from,
+            state: room.latestOffer.state,
+            claimedBy: room.latestOffer.claimedBy ?? null,
+          }
+        : null,
     };
   }
   return snapshot;
@@ -171,22 +190,54 @@ function relayMessage(room, senderId, message) {
   return delivered;
 }
 
+function sendMessageToClient(room, senderId, recipientId, message) {
+  const recipient = room.clients.get(recipientId);
+  if (!recipient?.socket || recipient.socket.readyState !== recipient.socket.OPEN) {
+    return false;
+  }
+  recipient.socket.send(JSON.stringify({ from: senderId, message }));
+  return true;
+}
+
 function rememberReplayableMessage(room, senderId, message) {
   if (message?.type === 'offer' && offerHasMediaSections(message)) {
-    room.latestOffer = { from: senderId, message };
+    room.latestOffer = { from: senderId, message, state: 'fresh', claimedBy: null };
   }
+}
+
+function consumeReplayableOffer(room, answererId) {
+  const latestOffer = room.latestOffer;
+  if (!latestOffer || latestOffer.state === 'consumed') return null;
+  latestOffer.state = 'consumed';
+  latestOffer.claimedBy = latestOffer.claimedBy ?? answererId;
+  return latestOffer;
+}
+
+function findConnectedOfferer(room) {
+  if (room.latestOffer?.from) {
+    const latestOfferer = room.clients.get(room.latestOffer.from);
+    if (latestOfferer?.socket && latestOfferer.socket.readyState === latestOfferer.socket.OPEN) {
+      return latestOfferer;
+    }
+  }
+  return Array.from(room.clients.values()).find((client) =>
+    client.role !== 'answerer' && client.socket && client.socket.readyState === client.socket.OPEN
+  ) ?? null;
 }
 
 function replayLatestOffer(room, clientId, socket, role) {
   if (role !== 'answerer') return null;
   const latestOffer = room.latestOffer;
   if (!latestOffer || latestOffer.from === clientId) return null;
+  if (latestOffer.state !== 'fresh') return null;
   const offerer = room.clients.get(latestOffer.from);
   if (!offerer?.socket || offerer.socket.readyState !== offerer.socket.OPEN) {
     room.latestOffer = null;
     return null;
   }
   socket.send(JSON.stringify({ from: latestOffer.from, message: latestOffer.message }));
+  latestOffer.state = 'claimed';
+  latestOffer.claimedBy = clientId;
   return latestOffer;
 }
 
@@ -225,6 +276,7 @@ export function createSignalingServer(options = {}) {
       room.clients.set(id, { clientId: id, socket: null });
       recordEvent({ event: 'join', roomId, clientId: id, initiator: isInitiator });
 
+      const responseBaseUrl = externalBaseUrlForRequest(request, publicBaseUrl);
       json(response, 200, {
         result: 'SUCCESS',
         params: {
@@ -232,9 +284,9 @@ export function createSignalingServer(options = {}) {
           client_id: id,
           is_initiator: String(isInitiator),
           messages: [],
-          wss_url: wsUrlFromBase(publicBaseUrl),
-          wss_post_url: `${publicBaseUrl}/message/${encodeURIComponent(roomId)}/${id}`,
-          ice_server_url: `${publicBaseUrl}/ice`,
+          wss_url: wsUrlFromBase(responseBaseUrl),
+          wss_post_url: `${responseBaseUrl}/message/${encodeURIComponent(roomId)}/${id}`,
+          ice_server_url: `${responseBaseUrl}/ice`,
           pc_config: { iceServers },
         },
       });
@@ -280,6 +332,12 @@ export function createSignalingServer(options = {}) {
           return;
         }
         rememberReplayableMessage(room, clientId, message);
+        if (message?.type === 'answer') {
+          const consumed = consumeReplayableOffer(room, clientId);
+          if (consumed) {
+            recordEvent({ event: 'offer-consumed', roomId, clientId, from: consumed.from });
+          }
+        }
         const delivered = relayMessage(room, clientId, message);
         recordEvent({ event: 'relay', roomId, clientId, transport: 'http', delivered });
       } catch {
@@ -321,12 +379,19 @@ export function createSignalingServer(options = {}) {
     const room = ensureRoom(rooms, roomId);
     const client = room.clients.get(id) ?? { clientId: id, socket: null };
     client.socket = socket;
+    client.role = url.searchParams.get('role') || 'offerer';
     room.clients.set(id, client);
-    recordEvent({ event: 'ws-open', roomId, clientId: id });
+    recordEvent({ event: 'ws-open', roomId, clientId: id, role: client.role });
     const replayRole = url.searchParams.get('role');
     const replayedOffer = replayLatestOffer(room, id, socket, replayRole);
     if (replayedOffer) {
       recordEvent({ event: 'replay', roomId, clientId: id, from: replayedOffer.from, message: summarizeMessage(replayedOffer.message) });
+    } else if (replayRole === 'answerer') {
+      const offerer = findConnectedOfferer(room);
+      if (offerer && offerer.clientId !== id) {
+        const delivered = sendMessageToClient(room, id, offerer.clientId, { type: 'reoffer-request', reason: 'no-fresh-offer' });
+        recordEvent({ event: 'reoffer-request', roomId, clientId: id, to: offerer.clientId, delivered });
+      }
     }
 
     socket.on('message', (data) => {
@@ -344,6 +409,12 @@ export function createSignalingServer(options = {}) {
         return;
       }
       rememberReplayableMessage(room, id, message);
+      if (message?.type === 'answer') {
+        const consumed = consumeReplayableOffer(room, id);
+        if (consumed) {
+          recordEvent({ event: 'offer-consumed', roomId, clientId: id, from: consumed.from });
+        }
+      }
       const delivered = relayMessage(room, id, message);
       recordEvent({ event: 'relay', roomId, clientId: id, transport: 'websocket', delivered });
     });

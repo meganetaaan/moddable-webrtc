@@ -485,6 +485,42 @@ static const char *configured_peer_role_name(void)
 #endif
 }
 
+static void start_local_offer(void);
+
+static void close_peer_for_reoffer(void)
+{
+    if (!app.peer) {
+        app.local_offer_started = false;
+        app.peer_connected = false;
+        return;
+    }
+
+    ESP_LOGI(TAG, "closing stale peer before reoffer");
+#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
+    app.audio_task_running = false;
+#endif
+    app.peer_loop_running = false;
+    vTaskDelay(pdMS_TO_TICKS(80));
+    int ret = esp_peer_close(app.peer);
+    ESP_LOGI(TAG, "esp_peer_close ret=%d", ret);
+    app.peer = NULL;
+    app.peer_connected = false;
+    app.local_offer_started = false;
+    app.data_stream_id = 0;
+    log_heap("after-peer-close");
+}
+
+static void handle_reoffer_request(void)
+{
+#if CONFIG_STACKCHAN_PEER_ROLE_ESP_OFFERER
+    ESP_LOGI(TAG, "signaling reoffer-request: recreate peer and publish fresh offer");
+    close_peer_for_reoffer();
+    start_local_offer();
+#else
+    ESP_LOGW(TAG, "ignore reoffer-request while configured as browser-offerer answerer");
+#endif
+}
+
 static esp_err_t ensure_peer_open(void)
 {
     if (app.peer) {
@@ -642,6 +678,8 @@ static void handle_signaling_payload(const char *payload, int len)
     } else if (type && strcmp(type, "candidate") == 0) {
         const char *candidate = json_string(message, "candidate");
         forward_to_peer(type, candidate, candidate ? strlen(candidate) + 1 : 0);
+    } else if (type && strcmp(type, "reoffer-request") == 0) {
+        handle_reoffer_request();
     }
 
     cJSON_Delete(root);

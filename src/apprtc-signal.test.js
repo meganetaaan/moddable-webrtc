@@ -90,7 +90,7 @@ describe('AppRTC-compatible signaling server', () => {
 
     assert.equal(first.result, 'SUCCESS');
     assert.equal(first.params.room_id, 'stackchan');
-    assert.match(first.params.client_id, /^device-/);
+    assert.match(first.params.client_id, /^device-[0-9a-f]{8}$/);
     assert.equal(first.params.is_initiator, 'true');
     assert.equal(first.params.wss_url, 'ws://device-host.test:18091/ws');
     assert.equal(first.params.wss_post_url, `http://device-host.test:18091/message/stackchan/${first.params.client_id}`);
@@ -102,6 +102,28 @@ describe('AppRTC-compatible signaling server', () => {
     assert.equal(second.result, 'SUCCESS');
     assert.notEqual(second.params.client_id, first.params.client_id);
     assert.equal(second.params.is_initiator, 'false');
+  });
+
+  it('advertises request-local websocket URLs for LAN firmware clients and forwarded tunnel URLs for phones', async () => {
+    const lan = await readJson(await fetch(`${baseUrl}/join/stackchan`, {
+      method: 'POST',
+      headers: {
+        'x-forwarded-proto': 'http',
+        'x-forwarded-host': '192.168.7.135:18091',
+      },
+    }));
+    assert.equal(lan.params.wss_url, 'ws://192.168.7.135:18091/ws');
+    assert.equal(lan.params.wss_post_url, `http://192.168.7.135:18091/message/stackchan/${lan.params.client_id}`);
+
+    const tunnel = await readJson(await fetch(`${baseUrl}/join/stackchan`, {
+      method: 'POST',
+      headers: {
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': 'velvet-lottery-purpose-gossip.trycloudflare.com',
+      },
+    }));
+    assert.equal(tunnel.params.wss_url, 'wss://velvet-lottery-purpose-gossip.trycloudflare.com/ws');
+    assert.equal(tunnel.params.ice_server_url, 'https://velvet-lottery-purpose-gossip.trycloudflare.com/ice');
   });
 
   it('serves configurable ICE metadata in AppRTC shape', async () => {
@@ -213,7 +235,7 @@ describe('AppRTC-compatible signaling server', () => {
     socketOther.close();
   });
 
-  it('replays the latest offer to an answerer that joins after the ESP offerer is already waiting', async () => {
+  it('replays one fresh offer to a single answerer and then consumes it after an answer', async () => {
     const esp = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
     const socketEsp = new WebSocket(wsUrl(baseUrl, 'stackchan', esp.params.client_id));
     await waitForOpen(socketEsp);
@@ -226,9 +248,10 @@ describe('AppRTC-compatible signaling server', () => {
     const phoneUrl = new URL(wsUrl(baseUrl, 'stackchan', phone.params.client_id));
     phoneUrl.searchParams.set('role', 'answerer');
     const socketPhone = new WebSocket(phoneUrl);
+    const replayPromise = waitForMessageWithin(socketPhone);
     await waitForOpen(socketPhone);
 
-    assert.deepEqual(await waitForMessageWithin(socketPhone), {
+    assert.deepEqual(await replayPromise, {
       from: esp.params.client_id,
       message: offer,
     });
@@ -240,10 +263,26 @@ describe('AppRTC-compatible signaling server', () => {
       message: { type: 'answer', sdp: 'v=0\r\na=setup:active\r\n' },
     });
 
+    const laterPhone = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const laterPhoneUrl = new URL(wsUrl(baseUrl, 'stackchan', laterPhone.params.client_id));
+    laterPhoneUrl.searchParams.set('role', 'answerer');
+    const reofferRequestPromise = waitForMessageWithin(socketEsp);
+    const socketLaterPhone = new WebSocket(laterPhoneUrl);
+    await waitForOpen(socketLaterPhone);
+
+    const reofferRequest = await reofferRequestPromise;
+    assert.deepEqual(reofferRequest, {
+      from: laterPhone.params.client_id,
+      message: { type: 'reoffer-request', reason: 'no-fresh-offer' },
+    });
+    await assert.rejects(waitForMessageWithin(socketLaterPhone, 80), /timed out waiting/);
+
     const { events } = await readJson(await fetch(`${baseUrl}/debug/events`));
     assert.ok(events.some((event) => event.event === 'replay' && event.clientId === phone.params.client_id && event.from === esp.params.client_id));
+    assert.ok(events.some((event) => event.event === 'offer-consumed' && event.clientId === phone.params.client_id && event.from === esp.params.client_id));
+    assert.ok(events.some((event) => event.event === 'reoffer-request' && event.clientId === laterPhone.params.client_id && event.to === esp.params.client_id));
 
-    await Promise.all([closeSocket(socketEsp), closeSocket(socketPhone)]);
+    await Promise.all([closeSocket(socketEsp), closeSocket(socketPhone), closeSocket(socketLaterPhone)]);
   });
 
   it('ignores later offer messages without media so they do not break an active answerer', async () => {
@@ -351,8 +390,10 @@ describe('AppRTC-compatible signaling server', () => {
           {
             clientId: joined.params.client_id,
             connected: false,
+            role: null,
           },
         ],
+        latestOffer: null,
       },
     });
   });
@@ -412,6 +453,7 @@ describe('AppRTC-compatible signaling server', () => {
       { event: 'message', roomId: 'stackchan', clientId: a.params.client_id, transport: 'http' },
       { event: 'relay', roomId: 'stackchan', clientId: a.params.client_id, transport: 'http' },
       { event: 'message', roomId: 'stackchan', clientId: b.params.client_id, transport: 'websocket' },
+      { event: 'offer-consumed', roomId: 'stackchan', clientId: b.params.client_id, transport: undefined },
       { event: 'relay', roomId: 'stackchan', clientId: b.params.client_id, transport: 'websocket' },
       { event: 'close', roomId: 'stackchan', clientId: a.params.client_id, transport: undefined },
     ]);
