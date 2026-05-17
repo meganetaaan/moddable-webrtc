@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "start:signaling": "node src/apprtc-signal.js"
+    "start:signaling": "node src/apprtc-signal.js",
+    "start:lan-signaling": "node src/start-lan-signaling.js"
   },
   "dependencies": {
     "ws": "^8.18.0"

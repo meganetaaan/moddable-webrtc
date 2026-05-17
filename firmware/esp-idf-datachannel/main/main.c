@@ -1,6 +1,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,6 +14,8 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_peer.h"
+#include "esp_peer_default.h"
+#include "esp_timer.h"
 #include "esp_websocket_client.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -28,6 +31,7 @@
 static const char *TAG = "stackchan_dc";
 static EventGroupHandle_t wifi_events;
 static int wifi_retry_count;
+static esp_peer_default_cfg_t peer_default_cfg;
 
 typedef struct {
     char base_url[URL_BUF_SIZE];
@@ -39,9 +43,31 @@ typedef struct {
     esp_websocket_client_handle_t ws;
     esp_peer_handle_t peer;
     bool peer_loop_running;
+    bool peer_connected;
+    bool audio_task_running;
+    uint32_t audio_tx_frames;
+    uint32_t audio_tx_bytes;
+    uint32_t audio_tx_drops;
+    uint32_t audio_rx_frames;
+    uint32_t audio_rx_bytes;
+    uint32_t data_rx_frames;
+    uint16_t data_stream_id;
 } app_ctx_t;
 
 static app_ctx_t app;
+
+static esp_err_t format_into(char *dest, size_t dest_size, const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    int written = vsnprintf(dest, dest_size, fmt, args);
+    va_end(args);
+    if (written < 0 || (size_t)written >= dest_size) {
+        ESP_LOGE(TAG, "formatted string truncated: need=%d cap=%u", written, (unsigned)dest_size);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    return ESP_OK;
+}
 
 typedef struct {
     char *data;
@@ -183,15 +209,77 @@ static int peer_msg_callback(esp_peer_msg_t *msg, void *ctx)
 static int peer_state_callback(esp_peer_state_t state, void *ctx)
 {
     ESP_LOGI(TAG, "peer state=%d", state);
+    app.peer_connected = state == ESP_PEER_STATE_CONNECTED ||
+                         state == ESP_PEER_STATE_DATA_CHANNEL_CONNECTED ||
+                         state == ESP_PEER_STATE_DATA_CHANNEL_OPENED;
+    if (state == ESP_PEER_STATE_CONNECTED) {
+        log_heap("peer-connected");
+    }
+    return 0;
+}
+
+static int peer_audio_info_callback(esp_peer_audio_stream_info_t *info, void *ctx)
+{
+    ESP_LOGI(TAG, "audio info codec=%d sample_rate=%u channel=%u",
+             info->codec,
+             (unsigned)info->sample_rate,
+             (unsigned)info->channel);
+    return 0;
+}
+
+static int peer_audio_data_callback(esp_peer_audio_frame_t *frame, void *ctx)
+{
+    app.audio_rx_frames++;
+    app.audio_rx_bytes += frame->size;
+    if (app.audio_rx_frames == 1 || app.audio_rx_frames % 50 == 0) {
+        ESP_LOGI(TAG, "audio rx frames=%u bytes=%u pts=%u last_size=%d",
+                 (unsigned)app.audio_rx_frames,
+                 (unsigned)app.audio_rx_bytes,
+                 (unsigned)frame->pts,
+                 frame->size);
+    }
+    return 0;
+}
+
+static int peer_video_info_callback(esp_peer_video_stream_info_t *info, void *ctx)
+{
+    ESP_LOGI(TAG, "video info codec=%d width=%d height=%d fps=%d",
+             info->codec, info->width, info->height, info->fps);
+    return 0;
+}
+
+static int peer_video_data_callback(esp_peer_video_frame_t *frame, void *ctx)
+{
+    ESP_LOGI(TAG, "video rx frame pts=%u bytes=%d", (unsigned)frame->pts, frame->size);
+    return 0;
+}
+
+static int peer_channel_open_callback(esp_peer_data_channel_info_t *ch, void *ctx)
+{
+    app.data_stream_id = ch->stream_id;
+    ESP_LOGI(TAG, "datachannel open label=%s stream_id=%u",
+             ch->label ? ch->label : "(none)",
+             (unsigned)ch->stream_id);
+    return 0;
+}
+
+static int peer_channel_close_callback(esp_peer_data_channel_info_t *ch, void *ctx)
+{
+    ESP_LOGI(TAG, "datachannel close label=%s stream_id=%u",
+             ch->label ? ch->label : "(none)",
+             (unsigned)ch->stream_id);
     return 0;
 }
 
 static int peer_data_callback(esp_peer_data_frame_t *frame, void *ctx)
 {
-    ESP_LOGI(TAG, "datachannel message label=%s type=%d bytes=%u",
-             frame->label ? frame->label : "(none)",
+    app.data_rx_frames++;
+    app.data_stream_id = frame->stream_id;
+    ESP_LOGI(TAG, "datachannel message stream_id=%u type=%d bytes=%u count=%u",
+             (unsigned)frame->stream_id,
              frame->type,
-             (unsigned)frame->size);
+             (unsigned)frame->size,
+             (unsigned)app.data_rx_frames);
 
     int prefix = frame->size < CONFIG_STACKCHAN_LOG_PAYLOAD_PREFIX ? frame->size : CONFIG_STACKCHAN_LOG_PAYLOAD_PREFIX;
     ESP_LOGI(TAG, "datachannel prefix=%.*s", prefix, (const char *)frame->data);
@@ -200,9 +288,9 @@ static int peer_data_callback(esp_peer_data_frame_t *frame, void *ctx)
         const char pong[] = "{\"type\":\"pong\",\"from\":\"cores3\"}";
         esp_peer_data_frame_t response = {
             .type = ESP_PEER_DATA_CHANNEL_STRING,
+            .stream_id = frame->stream_id,
             .data = (uint8_t *)pong,
             .size = strlen(pong),
-            .label = frame->label,
         };
         int ret = esp_peer_send_data(app.peer, &response);
         ESP_LOGI(TAG, "datachannel pong ret=%d bytes=%u", ret, (unsigned)response.size);
@@ -219,6 +307,65 @@ static void peer_loop_task(void *arg)
     vTaskDelete(NULL);
 }
 
+static void audio_test_task(void *arg)
+{
+#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
+    uint8_t frame[CONFIG_STACKCHAN_AUDIO_TEST_FRAME_BYTES];
+    memset(frame, 0xd5, sizeof(frame));
+    ESP_LOGI(TAG, "audio test source start codec=PCMA sample_rate=8000 channel=1 frame_bytes=%u interval_ms=%u",
+             (unsigned)sizeof(frame),
+             (unsigned)CONFIG_STACKCHAN_AUDIO_TEST_INTERVAL_MS);
+    log_heap("audio-test-start");
+
+    while (app.audio_task_running) {
+        if (app.peer && app.peer_connected) {
+            esp_peer_audio_frame_t audio = {
+                .pts = (uint32_t)(esp_timer_get_time() / 1000),
+                .data = frame,
+                .size = sizeof(frame),
+            };
+            int ret = esp_peer_send_audio(app.peer, &audio);
+            if (ret == 0) {
+                app.audio_tx_frames++;
+                app.audio_tx_bytes += sizeof(frame);
+            } else {
+                app.audio_tx_drops++;
+            }
+            if (app.audio_tx_frames == 1 || app.audio_tx_frames % 50 == 0 || ret != 0) {
+                ESP_LOGI(TAG, "audio tx frames=%u bytes=%u drops=%u last_ret=%d",
+                         (unsigned)app.audio_tx_frames,
+                         (unsigned)app.audio_tx_bytes,
+                         (unsigned)app.audio_tx_drops,
+                         ret);
+                log_heap("audio-test-running");
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(CONFIG_STACKCHAN_AUDIO_TEST_INTERVAL_MS));
+    }
+#endif
+    vTaskDelete(NULL);
+}
+
+static esp_peer_media_dir_t configured_audio_dir(void)
+{
+#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
+    return ESP_PEER_MEDIA_DIR_SEND_ONLY;
+#else
+    return ESP_PEER_MEDIA_DIR_NONE;
+#endif
+}
+
+static const char *configured_media_mode(void)
+{
+#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
+    return "audio-test-source";
+#elif CONFIG_STACKCHAN_MEDIA_VIDEO_PLACEHOLDER
+    return "video-placeholder";
+#else
+    return "none";
+#endif
+}
+
 static esp_err_t ensure_peer_open(void)
 {
     if (app.peer) {
@@ -226,16 +373,52 @@ static esp_err_t ensure_peer_open(void)
     }
 
     log_heap("before-peer-open");
+    ESP_LOGI(TAG, "media mode=%s audio_dir=%d video_dir=%d",
+             configured_media_mode(),
+             configured_audio_dir(),
+             ESP_PEER_MEDIA_DIR_NONE);
+#if CONFIG_STACKCHAN_MEDIA_VIDEO_PLACEHOLDER
+    ESP_LOGW(TAG, "video media mode is a placeholder; no camera/codec source is wired in this slice");
+#endif
+
+    peer_default_cfg = (esp_peer_default_cfg_t) {
+        .agent_recv_timeout = 100,
+        .data_ch_cfg = {
+            .recv_cache_size = 1536,
+            .send_cache_size = 1536,
+        },
+        .rtp_cfg = {
+            .audio_recv_jitter = {
+                .cache_size = 2048,
+            },
+            .send_pool_size = 8192,
+            .send_queue_num = 16,
+        },
+    };
+
     esp_peer_cfg_t cfg = {
         .role = ESP_PEER_ROLE_CONTROLLED,
         .ice_trans_policy = ESP_PEER_ICE_TRANS_POLICY_ALL,
-        .audio_dir = ESP_PEER_MEDIA_DIR_NONE,
+        .audio_info = {
+            .codec = ESP_PEER_AUDIO_CODEC_G711A,
+            .sample_rate = 8000,
+            .channel = 1,
+        },
+        .audio_dir = configured_audio_dir(),
         .video_dir = ESP_PEER_MEDIA_DIR_NONE,
         .enable_data_channel = true,
+        .extra_cfg = &peer_default_cfg,
+        .extra_size = sizeof(peer_default_cfg),
         .ctx = &app,
         .on_state = peer_state_callback,
         .on_msg = peer_msg_callback,
+        .on_audio_info = peer_audio_info_callback,
+        .on_audio_data = peer_audio_data_callback,
+        .on_video_info = peer_video_info_callback,
+        .on_video_data = peer_video_data_callback,
+        .on_channel_open = peer_channel_open_callback,
         .on_data = peer_data_callback,
+        .on_channel_close = peer_channel_close_callback,
     };
 
     int ret = esp_peer_open(&cfg, esp_peer_get_default_impl(), &app.peer);
@@ -250,6 +433,14 @@ static esp_err_t ensure_peer_open(void)
         ESP_LOGE(TAG, "failed to start peer loop task");
         return ESP_ERR_NO_MEM;
     }
+#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
+    app.audio_task_running = true;
+    if (xTaskCreate(audio_test_task, "audio_test", 4096, NULL, 5, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "failed to start audio test task");
+        app.audio_task_running = false;
+        return ESP_ERR_NO_MEM;
+    }
+#endif
     return ESP_OK;
 }
 
@@ -264,7 +455,7 @@ static void forward_to_peer(const char *type, const char *data, size_t size)
     }
 
     esp_peer_msg_t msg = {
-        .type = strcmp(type, "candidate") == 0 ? ESP_PEER_MSG_TYPE_ICE : ESP_PEER_MSG_TYPE_SDP,
+        .type = strcmp(type, "candidate") == 0 ? ESP_PEER_MSG_TYPE_CANDIDATE : ESP_PEER_MSG_TYPE_SDP,
         .data = (uint8_t *)data,
         .size = size,
     };
@@ -334,14 +525,25 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
 static esp_err_t join_room(void)
 {
     char url[URL_BUF_SIZE];
-    char response[HTTP_BUF_SIZE];
-    snprintf(url, sizeof(url), "%s/join/%s", app.base_url, app.room);
-    esp_err_t ret = http_json(url, HTTP_METHOD_POST, "{}", response, sizeof(response));
+    char *response = malloc(HTTP_BUF_SIZE);
+    if (!response) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = format_into(url, sizeof(url), "%s/join/%s", app.base_url, app.room);
     if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "join url too long");
+        free(response);
+        return ret;
+    }
+    ret = http_json(url, HTTP_METHOD_POST, "{}", response, HTTP_BUF_SIZE);
+    if (ret != ESP_OK) {
+        free(response);
         return ret;
     }
 
     cJSON *root = cJSON_Parse(response);
+    free(response);
     if (!root) {
         return ESP_FAIL;
     }
@@ -367,16 +569,17 @@ static esp_err_t ping_signaling(void)
 {
     char url[URL_BUF_SIZE];
     char response[256];
-    snprintf(url, sizeof(url), "%s/ping", app.base_url);
+    ESP_RETURN_ON_ERROR(format_into(url, sizeof(url), "%s/ping", app.base_url), TAG, "ping url too long");
     return http_json(url, HTTP_METHOD_GET, NULL, response, sizeof(response));
 }
 
 static esp_err_t start_websocket(void)
 {
-    snprintf(app.ws_url, sizeof(app.ws_url), "%s?roomId=%s&clientId=%s", app.wss_url, app.room, app.client_id);
+    ESP_RETURN_ON_ERROR(format_into(app.ws_url, sizeof(app.ws_url), "%s?roomId=%s&clientId=%s", app.wss_url, app.room, app.client_id), TAG, "websocket url too long");
     esp_websocket_client_config_t config = {
         .uri = app.ws_url,
         .network_timeout_ms = 8000,
+        .buffer_size = HTTP_BUF_SIZE,
     };
     app.ws = esp_websocket_client_init(&config);
     if (!app.ws) {

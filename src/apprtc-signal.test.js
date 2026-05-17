@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import WebSocket from 'ws';
 
-import { createSignalingServer } from './apprtc-signal.js';
+import { createSignalingServer, isDirectRun } from './apprtc-signal.js';
 
 async function readJson(response) {
   return JSON.parse(await response.text());
@@ -48,6 +48,12 @@ function waitForMessage(socket) {
 }
 
 describe('AppRTC-compatible signaling server', () => {
+  it('detects direct CLI execution when Node receives a relative script path', () => {
+    assert.equal(isDirectRun(new URL('./apprtc-signal.js', import.meta.url).href, 'src/apprtc-signal.js'), true);
+    assert.equal(isDirectRun(new URL('./apprtc-signal.js', import.meta.url).href, 'src/other.js'), false);
+    assert.equal(isDirectRun(new URL('./apprtc-signal.js', import.meta.url).href, undefined), false);
+  });
+
   let app;
   let baseUrl;
 
@@ -253,9 +259,37 @@ describe('AppRTC-compatible signaling server', () => {
 
     const messageEvents = events.filter((event) => event.event === 'message');
     assert.deepEqual(messageEvents.map((event) => event.message), [
-      { type: 'offer', sdpLength: 22 },
+      { type: 'offer', sdpLength: 22, media: [] },
       { type: 'candidate', candidate: 'candidate:1 1 udp 2122260223 192.0.2.1 54545 typ host generation...' },
-      { type: 'answer', sdpLength: 21 },
+      { type: 'answer', sdpLength: 21, media: [] },
     ]);
+  });
+
+  it('records SDP media lines in debug event summaries', async () => {
+    const a = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const b = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const socketA = new WebSocket(wsUrl(baseUrl, 'stackchan', a.params.client_id));
+    const socketB = new WebSocket(wsUrl(baseUrl, 'stackchan', b.params.client_id));
+    await Promise.all([waitForOpen(socketA), waitForOpen(socketB)]);
+
+    const receivedOffer = waitForMessage(socketB);
+    socketA.send(JSON.stringify({
+      type: 'offer',
+      sdp: 'v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 8\r\na=mid:0\r\na=recvonly\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=mid:1\r\n',
+    }));
+    await receivedOffer;
+
+    const { events } = await readJson(await fetch(`${baseUrl}/debug/events`));
+    const offerEvent = events.find((event) => event.event === 'message' && event.message.type === 'offer');
+    assert.deepEqual(offerEvent.message.media, [
+      'm=audio 9 UDP/TLS/RTP/SAVPF 8',
+      'a=mid:0',
+      'a=recvonly',
+      'm=application 9 UDP/DTLS/SCTP webrtc-datachannel',
+      'a=mid:1',
+    ]);
+
+    socketA.close();
+    socketB.close();
   });
 });

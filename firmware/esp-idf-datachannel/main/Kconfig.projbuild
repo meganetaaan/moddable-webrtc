@@ -29,4 +29,42 @@ config STACKCHAN_LOG_PAYLOAD_PREFIX
     help
         Bounded prefix length for serial logs of signaling payloads.
 
+choice STACKCHAN_MEDIA_MODE
+    prompt "WebRTC media mode"
+    default STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
+    help
+        Select the native media shape to negotiate with the browser probe.
+
+config STACKCHAN_MEDIA_NONE
+    bool "None: DataChannel only"
+
+config STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
+    bool "Audio: generated PCMA test source"
+    help
+        Negotiate a send-only audio track and send generated 8 kHz G.711 A-law
+        frames. This proves RTP/media transport before wiring CoreS3 I2S capture.
+
+config STACKCHAN_MEDIA_VIDEO_PLACEHOLDER
+    bool "Video placeholder: documented only"
+    help
+        Reserved for a later camera/MJPEG or H.264 source. This option logs that
+        video is not implemented and keeps media disabled so DataChannel remains
+        testable.
+
+endchoice
+
+config STACKCHAN_AUDIO_TEST_INTERVAL_MS
+    int "Audio test frame interval milliseconds"
+    default 20
+    range 20 100
+    depends on STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
+
+config STACKCHAN_AUDIO_TEST_FRAME_BYTES
+    int "Audio test PCMA frame bytes"
+    default 160
+    range 80 320
+    depends on STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
+    help
+        160 bytes is 20 ms of 8 kHz mono G.711 A-law audio.
+
 endmenu
