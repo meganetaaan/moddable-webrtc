@@ -8,6 +8,7 @@ import {
   describeDataChannelMessage,
   normalizeRemoteCandidate,
   parseProbeConfig,
+  summarizeCandidate,
   summarizeIceServers,
   summarizeSdpMedia,
 } from './browser-probe.js';
@@ -126,6 +127,13 @@ describe('browser probe helpers', () => {
     assert.equal(JSON.stringify(summary).includes('turn-user'), false);
     assert.equal(JSON.stringify(summary).includes('turn-secret'), false);
     assert.equal(JSON.stringify(summary).includes('secret-pass'), false);
+  });
+
+  it('summarizes candidates by type without needing full verbose browser logs', () => {
+    assert.deepEqual(
+      summarizeCandidate('candidate:842163049 1 udp 1677729535 203.0.113.10 59902 typ relay raddr 0.0.0.0 rport 0'),
+      { type: 'relay', protocol: 'udp', address: '203.0.113.10:59902' },
+    );
   });
 
   it('labels DataChannel pong payloads as decisive evidence', () => {

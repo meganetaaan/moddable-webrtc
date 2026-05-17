@@ -51,6 +51,18 @@ export function normalizeRemoteCandidate(message) {
   return candidate;
 }
 
+export function summarizeCandidate(candidateLine = '') {
+  const value = String(candidateLine);
+  const type = value.match(/ typ ([^ ]+)/)?.[1] ?? 'unknown';
+  const protocol = value.match(/^candidate:[^ ]+ [^ ]+ ([^ ]+)/)?.[1]?.toLowerCase() ?? 'unknown';
+  const address = value.match(/^candidate:[^ ]+ [^ ]+ [^ ]+ [^ ]+ ([^ ]+) ([^ ]+)/);
+  return {
+    type,
+    protocol,
+    address: address ? `${address[1]}:${address[2]}` : 'unknown',
+  };
+}
+
 export function summarizeSdpMedia(sdp = '') {
   return sdp
     .split(/\r?\n/)
@@ -202,12 +214,17 @@ async function createPeerConnection(config, sendMessage) {
   peer.onicecandidate = (event) => {
     const message = buildCandidateMessage(event);
     if (message) {
-      appendLog(`send candidate ${message.candidate.slice(0, 80)}`);
+      appendLog(`send candidate ${JSON.stringify(summarizeCandidate(message.candidate))} ${message.candidate.slice(0, 120)}`);
       sendMessage(message);
+    } else {
+      appendLog('icecandidate end-of-candidates');
     }
   };
   peer.onconnectionstatechange = () => appendLog(`connectionState=${peer.connectionState}`);
   peer.oniceconnectionstatechange = () => appendLog(`iceConnectionState=${peer.iceConnectionState}`);
+  peer.onicegatheringstatechange = () => appendLog(`iceGatheringState=${peer.iceGatheringState}`);
+  peer.onsignalingstatechange = () => appendLog(`signalingState=${peer.signalingState}`);
+  peer.onicecandidateerror = (event) => appendLog(`icecandidateerror url=${event.url ?? 'unknown'} code=${event.errorCode ?? 'unknown'} text=${event.errorText ?? 'unknown'}`);
   peer.ontrack = (event) => attachRemoteTrack(event.track, event.streams);
   peer.ondatachannel = (event) => {
     const channel = event.channel;
