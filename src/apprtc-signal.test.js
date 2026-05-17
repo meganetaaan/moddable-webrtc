@@ -54,6 +54,17 @@ function waitForMessageWithin(socket, milliseconds = 300) {
   ]);
 }
 
+function closeSocket(socket) {
+  return new Promise((resolve) => {
+    if (socket.readyState === WebSocket.CLOSED) {
+      resolve();
+      return;
+    }
+    socket.once('close', resolve);
+    socket.close();
+  });
+}
+
 describe('AppRTC-compatible signaling server', () => {
   it('detects direct CLI execution when Node receives a relative script path', () => {
     assert.equal(isDirectRun(new URL('./apprtc-signal.js', import.meta.url).href, 'src/apprtc-signal.js'), true);
@@ -186,11 +197,12 @@ describe('AppRTC-compatible signaling server', () => {
       leaked = true;
     });
 
-    socketA.send(JSON.stringify({ type: 'offer', sdp: 'v=0...' }));
+    const offer = { type: 'offer', sdp: 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n' };
+    socketA.send(JSON.stringify(offer));
 
     assert.deepEqual(await receivedByB, {
       from: a.params.client_id,
-      message: { type: 'offer', sdp: 'v=0...' },
+      message: offer,
     });
 
     await new Promise((resolve) => setTimeout(resolve, 30));
@@ -231,15 +243,42 @@ describe('AppRTC-compatible signaling server', () => {
     const { events } = await readJson(await fetch(`${baseUrl}/debug/events`));
     assert.ok(events.some((event) => event.event === 'replay' && event.clientId === phone.params.client_id && event.from === esp.params.client_id));
 
-    socketEsp.close();
-    socketPhone.close();
+    await Promise.all([closeSocket(socketEsp), closeSocket(socketPhone)]);
+  });
+
+  it('ignores later offer messages without media so they do not break an active answerer', async () => {
+    const esp = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const phone = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const socketEsp = new WebSocket(wsUrl(baseUrl, 'stackchan', esp.params.client_id));
+    const phoneUrl = new URL(wsUrl(baseUrl, 'stackchan', phone.params.client_id));
+    phoneUrl.searchParams.set('role', 'answerer');
+    const socketPhone = new WebSocket(phoneUrl);
+    await Promise.all([waitForOpen(socketEsp), waitForOpen(socketPhone)]);
+
+    const validOffer = { type: 'offer', sdp: 'v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 8\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n' };
+    const receivedValidOffer = waitForMessage(socketPhone);
+    socketEsp.send(JSON.stringify(validOffer));
+    assert.deepEqual(await receivedValidOffer, { from: esp.params.client_id, message: validOffer });
+
+    let leaked = false;
+    socketPhone.once('message', () => {
+      leaked = true;
+    });
+    socketEsp.send(JSON.stringify({ type: 'offer', sdp: 'v=0\r\n' }));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(leaked, false);
+
+    const { events } = await readJson(await fetch(`${baseUrl}/debug/events`));
+    assert.ok(events.some((event) => event.event === 'ignore' && event.reason === 'offer-without-media' && event.clientId === esp.params.client_id));
+
+    await Promise.all([closeSocket(socketEsp), closeSocket(socketPhone)]);
   });
 
   it('does not replay an old offer to a later offerer-style client such as a reconnecting CoreS3', async () => {
     const oldEsp = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
     const socketOldEsp = new WebSocket(wsUrl(baseUrl, 'stackchan', oldEsp.params.client_id));
     await waitForOpen(socketOldEsp);
-    socketOldEsp.send(JSON.stringify({ type: 'offer', sdp: 'v=0\r\nold-offer\r\n' }));
+    socketOldEsp.send(JSON.stringify({ type: 'offer', sdp: 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nold-offer\r\n' }));
     await new Promise((resolve) => setTimeout(resolve, 30));
 
     const newEsp = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
@@ -326,7 +365,7 @@ describe('AppRTC-compatible signaling server', () => {
     await Promise.all([waitForOpen(socketA), waitForOpen(socketB)]);
 
     const receivedOffer = waitForMessage(socketB);
-    socketA.send(JSON.stringify({ type: 'offer', sdp: 'v=0\r\na=setup:actpass\r\n' }));
+    socketA.send(JSON.stringify({ type: 'offer', sdp: 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=setup:actpass\r\n' }));
     await receivedOffer;
 
     const receivedCandidate = waitForMessage(socketB);
@@ -379,7 +418,7 @@ describe('AppRTC-compatible signaling server', () => {
 
     const messageEvents = events.filter((event) => event.event === 'message');
     assert.deepEqual(messageEvents.map((event) => event.message), [
-      { type: 'offer', sdpLength: 22, media: [] },
+      { type: 'offer', sdpLength: 72, media: ['m=application 9 UDP/DTLS/SCTP webrtc-datachannel'] },
       { type: 'candidate', candidate: 'candidate:1 1 udp 2122260223 192.0.2.1 54545 typ host generation...' },
       { type: 'answer', sdpLength: 21, media: [] },
     ]);

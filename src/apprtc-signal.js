@@ -150,6 +150,15 @@ function summarizeMessage(message) {
   return { type: message.type ?? 'unknown' };
 }
 
+function offerHasMediaSections(message) {
+  if (message?.type !== 'offer' || typeof message.sdp !== 'string') return true;
+  return /^m=(audio|video|application)\s/m.test(message.sdp);
+}
+
+function shouldRelayMessage(message) {
+  return offerHasMediaSections(message);
+}
+
 function relayMessage(room, senderId, message) {
   let delivered = 0;
   const outbound = JSON.stringify({ from: senderId, message });
@@ -163,7 +172,7 @@ function relayMessage(room, senderId, message) {
 }
 
 function rememberReplayableMessage(room, senderId, message) {
-  if (message?.type === 'offer') {
+  if (message?.type === 'offer' && offerHasMediaSections(message)) {
     room.latestOffer = { from: senderId, message };
   }
 }
@@ -265,6 +274,11 @@ export function createSignalingServer(options = {}) {
       try {
         const message = JSON.parse(body);
         recordEvent({ event: 'message', roomId, clientId, transport: 'http', message: summarizeMessage(message) });
+        if (!shouldRelayMessage(message)) {
+          recordEvent({ event: 'ignore', roomId, clientId, transport: 'http', reason: 'offer-without-media', message: summarizeMessage(message) });
+          json(response, 200, { result: 'SUCCESS', ignored: true });
+          return;
+        }
         rememberReplayableMessage(room, clientId, message);
         const delivered = relayMessage(room, clientId, message);
         recordEvent({ event: 'relay', roomId, clientId, transport: 'http', delivered });
@@ -325,6 +339,10 @@ export function createSignalingServer(options = {}) {
       }
 
       recordEvent({ event: 'message', roomId, clientId: id, transport: 'websocket', message: summarizeMessage(message) });
+      if (!shouldRelayMessage(message)) {
+        recordEvent({ event: 'ignore', roomId, clientId: id, transport: 'websocket', reason: 'offer-without-media', message: summarizeMessage(message) });
+        return;
+      }
       rememberReplayableMessage(room, id, message);
       const delivered = relayMessage(room, id, message);
       recordEvent({ event: 'relay', roomId, clientId: id, transport: 'websocket', delivered });
@@ -343,16 +361,17 @@ export function createSignalingServer(options = {}) {
     server,
     close: async () => {
       for (const socket of websocketServer.clients) {
-        socket.close();
+        socket.terminate();
       }
+      server.closeAllConnections?.();
       await new Promise((resolve, reject) => {
-        server.close((error) => {
+        websocketServer.close((error) => {
           if (error) reject(error);
           else resolve();
         });
       });
       await new Promise((resolve, reject) => {
-        websocketServer.close((error) => {
+        server.close((error) => {
           if (error) reject(error);
           else resolve();
         });
