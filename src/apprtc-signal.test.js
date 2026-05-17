@@ -102,7 +102,7 @@ describe('AppRTC-compatible signaling server', () => {
     ]);
   });
 
-  it('adds TURN servers from environment config while preserving the default STUN server', async () => {
+  it('adds TURN servers from environment config before the default STUN server for firmware parsers', async () => {
     await app.close();
     app = createSignalingServer({
       publicBaseUrl: 'http://device-host.test:18091',
@@ -119,12 +119,12 @@ describe('AppRTC-compatible signaling server', () => {
     assert.deepEqual(ice, {
       result: 'SUCCESS',
       iceServers: [
-        { urls: ['stun:stun.l.google.com:19302'], username: 'unused', credential: 'unused' },
         {
           urls: ['turn:turn.example.com:3478?transport=udp', 'turns:turn.example.com:5349?transport=tcp'],
           username: 'test-user',
           credential: 'test-secret',
         },
+        { urls: ['stun:stun.l.google.com:19302'], username: 'unused', credential: 'unused' },
       ],
     });
   });
@@ -157,7 +157,7 @@ describe('AppRTC-compatible signaling server', () => {
       1_770_000_000_000,
     );
 
-    assert.deepEqual(iceServers[1], {
+    assert.deepEqual(iceServers[0], {
       urls: ['turn:staticauth.openrelay.metered.ca:80?transport=udp'],
       username: '1770000060',
       credential: 'ayJEUjsOg9J0J39G4Qncq7CqZlY=',

@@ -52,11 +52,11 @@ export function iceServersFromEnv(env = process.env, now = Date.now()) {
   }
   const turnCredentials = turnCredentialsFromEnv(env, now);
   return [
-    ...DEFAULT_ICE_SERVERS,
     {
       urls: turnUrls,
       ...turnCredentials,
     },
+    ...DEFAULT_ICE_SERVERS,
   ];
 }
 
