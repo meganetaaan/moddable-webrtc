@@ -525,14 +525,25 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
 static esp_err_t join_room(void)
 {
     char url[URL_BUF_SIZE];
-    char response[HTTP_BUF_SIZE];
-    ESP_RETURN_ON_ERROR(format_into(url, sizeof(url), "%s/join/%s", app.base_url, app.room), TAG, "join url too long");
-    esp_err_t ret = http_json(url, HTTP_METHOD_POST, "{}", response, sizeof(response));
+    char *response = malloc(HTTP_BUF_SIZE);
+    if (!response) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = format_into(url, sizeof(url), "%s/join/%s", app.base_url, app.room);
     if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "join url too long");
+        free(response);
+        return ret;
+    }
+    ret = http_json(url, HTTP_METHOD_POST, "{}", response, HTTP_BUF_SIZE);
+    if (ret != ESP_OK) {
+        free(response);
         return ret;
     }
 
     cJSON *root = cJSON_Parse(response);
+    free(response);
     if (!root) {
         return ESP_FAIL;
     }
@@ -568,6 +579,7 @@ static esp_err_t start_websocket(void)
     esp_websocket_client_config_t config = {
         .uri = app.ws_url,
         .network_timeout_ms = 8000,
+        .buffer_size = HTTP_BUF_SIZE,
     };
     app.ws = esp_websocket_client_init(&config);
     if (!app.ws) {
