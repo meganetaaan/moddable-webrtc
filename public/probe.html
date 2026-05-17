@@ -64,7 +64,9 @@
       Configure TURN on the signaling server with
       <code>TURN_URLS=turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349?transport=tcp</code>,
       plus either <code>TURN_USERNAME</code> and <code>TURN_CREDENTIAL</code>, or coturn REST-style <code>TURN_SECRET</code>.
-      The probe log shows relay policy and redacted ICE server schemes/hosts only.
+      The probe log shows relay policy and redacted ICE server schemes/hosts only. If a phone logs
+      <code>icecandidateerror ... code=701 ... host lookup</code>, retry with IP-literal <code>turn:</code> URLs
+      for that test run; avoid IP-literal <code>turns:</code> because TLS certificate names will not match.
     </p>
     <button id="start" type="button">Start probe</button>
     <p>Status: <strong id="status">idle</strong></p>

@@ -34,7 +34,7 @@ PORT=18091 \
 npm run start:signaling
 ```
 
-For external smartphone checks, expose the same signaling server through a Cloudflare Tunnel and configure TURN relay credentials on the server. `TURN_URLS` is comma-separated and may contain `turn:` and `turns:` URLs. If `TURN_URLS` is unset, `/ice` keeps the default STUN-only response. Use `TURN_USERNAME`/`TURN_CREDENTIAL` for long-term credentials, or `TURN_SECRET` for coturn REST-style time-limited credentials.
+For external smartphone checks, expose the same signaling server through a Cloudflare Tunnel and configure TURN relay credentials on the server. `TURN_URLS` is comma-separated and may contain `turn:` and `turns:` URLs. If `TURN_URLS` is unset, `/ice` keeps the default STUN-only response. Use `TURN_USERNAME`/`TURN_CREDENTIAL` for long-term credentials, or `TURN_SECRET` for coturn REST-style time-limited credentials. If a phone logs `icecandidateerror ... code=701 ... host lookup`, emit IP-literal `turn:` URLs for that test run to bypass the phone/network DNS failure; avoid IP-literal `turns:` because TLS certificate names will not match.
 
 ```bash
 PUBLIC_BASE_URL=https://stackchan.example.trycloudflare.com \
