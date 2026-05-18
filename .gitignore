@@ -10,3 +10,4 @@ firmware/esp-idf-datachannel/sdkconfig
 firmware/esp-idf-speaker-tone/build/
 firmware/esp-idf-speaker-tone/managed_components/
 firmware/esp-idf-speaker-tone/sdkconfig
+firmware/esp-idf-speaker-tone/dependencies.lock
