@@ -84,12 +84,22 @@ config STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
         Keep the generated source as the default known-good transport baseline.
 
 config STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
-    bool "Audio: CoreS3 ES7210 microphone source + browser receive decode"
+    bool "Audio: CoreS3 ES7210 microphone source + browser speaker playback"
     help
         Negotiate sendrecv audio explicitly for bidirectional proof. CoreS3
         keeps the ES7210 microphone -> browser PCMA path running, receives
-        browser microphone PCMA frames, decodes them to PCM16, and logs receive
-        and decode counters. This mode does not enable speaker I2S output.
+        browser microphone PCMA frames, decodes them to PCM16, and attempts to
+        write the decoded samples to the CoreS3 speaker I2S path while logging
+        receive, decode, speaker write, and drop counters.
+
+config STACKCHAN_MEDIA_CORE_S3_SPEAKER_SINK
+    bool "Audio: CoreS3 speaker sink"
+    help
+        Negotiate a receive-only audio track for the browser microphone ->
+        CoreS3 speaker slice. The firmware receives browser PCMA frames, decodes
+        them to PCM16, duplicates mono samples to stereo, and writes them to the
+        CoreS3 speaker I2S output. This keeps generated audio and CoreS3 mic
+        send-only modes as independent known-good baselines.
 
 config STACKCHAN_MEDIA_VIDEO_PLACEHOLDER
     bool "Video placeholder: documented only"
@@ -151,5 +161,20 @@ config STACKCHAN_CORE_S3_MIC_I2S_DIN_GPIO
     int "CoreS3 ES7210 I2S DATO-to-ESP GPIO"
     default 14
     depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE || STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
+
+config STACKCHAN_CORE_S3_SPEAKER_I2S_BCLK_GPIO
+    int "CoreS3 speaker I2S BCLK GPIO"
+    default 34
+    depends on STACKCHAN_MEDIA_CORE_S3_SPEAKER_SINK || STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
+
+config STACKCHAN_CORE_S3_SPEAKER_I2S_WS_GPIO
+    int "CoreS3 speaker I2S WS/LRCK GPIO"
+    default 33
+    depends on STACKCHAN_MEDIA_CORE_S3_SPEAKER_SINK || STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
+
+config STACKCHAN_CORE_S3_SPEAKER_I2S_DOUT_GPIO
+    int "CoreS3 speaker I2S data-out GPIO"
+    default 13
+    depends on STACKCHAN_MEDIA_CORE_S3_SPEAKER_SINK || STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
 
 endmenu

@@ -32,10 +32,12 @@ Set:
 - `Stack-chan ESP-IDF DataChannel probe -> WebRTC media mode`
   - `Audio: generated PCMA test source` for the native media proof.
   - `Audio: CoreS3 ES7210 microphone source` for the CoreS3 microphone-to-browser slice.
+  - `Audio: CoreS3 speaker sink` for the browser microphone-to-CoreS3 speaker slice.
+  - `Audio: CoreS3 ES7210 microphone source + browser speaker playback` for the guarded sendrecv proof.
   - `None: DataChannel only` if you need to bisect a DataChannel regression.
   - `Video placeholder` only documents the future camera path and leaves media disabled.
 
-The CoreS3 mic mode uses the M5Stack CoreS3 PinMap assumptions:
+The CoreS3 mic/speaker modes use the M5Stack CoreS3 PinMap assumptions:
 
 | Signal | GPIO |
 |---|---:|
@@ -45,8 +47,13 @@ The CoreS3 mic mode uses the M5Stack CoreS3 PinMap assumptions:
 | ES7210 I2S BCK | 34 |
 | ES7210 I2S WCK/LRCK | 33 |
 | ES7210 I2S DATO into ESP32-S3 | 14 |
+| Speaker I2S BCLK | 34 |
+| Speaker I2S WS/LRCK | 33 |
+| Speaker I2S DOUT from ESP32-S3 | 13 |
 
 The first mic slice uses ESP-IDF native I2C/I2S APIs, probes and configures ES7210 address `0x40`, captures 16-bit TDM samples, selects slot 0 as mono, converts PCM16 to G.711 A-law, and sends PCMA frames through `esp_peer_send_audio()` with a deterministic PTS increment based on captured samples. It logs the I2C probe/config result so a hardware run can separate an I2C/codec boundary from I2S capture or RTP send boundaries.
+
+The first speaker slice receives browser PCMA frames, decodes them to PCM16, duplicates mono to stereo, and writes them to the CoreS3 speaker I2S output. It intentionally starts with `Audio: CoreS3 speaker sink` (`audio_dir=recvonly`) so the browser-to-CoreS3 playback boundary can be checked before combining it with the CoreS3 mic path. Use the sendrecv duplex mode only after the sink mode shows `audio rx ...` plus `audio rx speaker writes=...` counters.
 
 Do not commit generated `sdkconfig` with real credentials.
 
@@ -100,6 +107,12 @@ For a mic-labeled run, `media=mic` is accepted as a browser-side alias for the s
 http://<lan-host-ip>:18090/probe?signal=http://<lan-host-ip>:18090&room=stackchan&role=offerer&icePolicy=all&media=mic
 ```
 
+For browser microphone → CoreS3 speaker playback, select `Audio: CoreS3 speaker sink` in firmware menuconfig and use the browser duplex probe so the browser sends an audio track:
+
+```text
+http://<lan-host-ip>:18091/probe?signal=http://<lan-host-ip>:18091&room=stackchan&role=offerer&icePolicy=all&media=audio-duplex
+```
+
 If `WebRTC offerer role` is set to `ESP offerer: CoreS3 offers`, use the same probe with `role=answerer` so the browser answers the CoreS3 SDP offer.
 
 
@@ -127,7 +140,9 @@ Capture these lines with timestamps:
 - DataChannel message callback and pong send return code.
 - Media mode, negotiated audio info, audio task start, `audio tx frames`, `audio tx bytes`, `audio tx drops`, and heap while audio is running.
 - For mic mode: `core-s3 mic es7210 probe ... ret=`, `core-s3 mic i2s init ret=`, `core-s3 mic acquire=... samples=... rms=... peak=... read_failures=... short_reads=... clips=... bytes_read=... frame_samples=... pts=...`, plus `core-s3-mic audio tx frames=... bytes=... drops=... ret_ok=... ret_fail=... last_ret=... pts=... pts_delta=... last_size=... size_min=... size_max=...`.
-- Browser `remote answer media ... m=audio ... a=sendonly`, `ontrack kind=audio`, `track unmute kind=audio`, `stats audio packets=... bytes=...`, and audio element `paused`, `muted`, `volume`, `readyState`, and `currentTime` logs.
+- For speaker sink mode: `audio rx frames=... bytes=... empty=... pts=... pts_delta=...`, `audio rx decode samples=... rms=... peak=...`, `core-s3 speaker i2s start ret=... sample_rate=8000 channels=2 pins ...`, and `audio rx speaker writes=... samples=... bytes=... drops=... short_writes=... last_ret=...`.
+- Browser CoreS3→browser checks: `remote answer media ... m=audio ... a=sendonly`, `ontrack kind=audio`, `track unmute kind=audio`, `stats audio packets=... bytes=...`, and audio element `paused`, `muted`, `volume`, `readyState`, and `currentTime` logs.
+- Browser→CoreS3 speaker checks: browser `media=audio-duplex` or sendonly offer, `browser mic acquired tracks=1`, outbound RTP `packetsSent`/`bytesSent` growth, plus the CoreS3 receive/decode/speaker write counters above.
 
 ## Boundary Table
 

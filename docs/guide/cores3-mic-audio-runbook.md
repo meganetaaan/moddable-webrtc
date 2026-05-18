@@ -10,7 +10,8 @@ Use it together with `docs/guide/webrtc-stuck-debugging.md`. Do not treat browse
 |---|---|---|---|
 | Generated audio baseline | `STACKCHAN_MEDIA_AUDIO_TEST_SOURCE=y` | `media=audio` | Known-good PCMA tone transport baseline. |
 | CoreS3 mic to browser | `STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE=y` | `media=audio` | Main issue #14 proof: CoreS3 ES7210 mic capture -> PCMA -> `esp_peer_send_audio()` -> browser receive. |
-| CoreS3 mic plus browser mic decode counters | `STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX=y` | `media=audio-duplex` | Bidirectional diagnostic mode. CoreS3 still sends mic audio and logs browser->CoreS3 receive/decode counters; it does not play browser audio on the speaker. |
+| CoreS3 mic plus browser mic speaker sink | `STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX=y` | `media=audio-duplex` | Bidirectional diagnostic mode. CoreS3 sends mic audio and plays browser->CoreS3 PCMA frames on the CoreS3 speaker while logging receive/decode/write counters. |
+| CoreS3 mic plus generated browser tone speaker sink | `STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX=y` | `media=audio-tone` | Same as duplex, but the browser sends a Web Audio 440 Hz tone instead of requiring microphone permission/device availability. Use this in headless or no-mic environments. |
 
 Keep generated audio available as the transport baseline while changing device I/O.
 
@@ -68,6 +69,12 @@ For duplex diagnostics, use browser mic permission and:
 http://127.0.0.1:18091/probe?room=stackchan&role=answerer&media=audio-duplex
 ```
 
+If the browser machine has no microphone or permission is unavailable, use the generated tone source instead. It still exercises browser outbound RTP -> CoreS3 receive/decode/speaker write boundaries:
+
+```text
+http://127.0.0.1:18091/probe?room=stackchan&role=answerer&media=audio-tone
+```
+
 Close stale probe tabs before resetting the CoreS3. If a fresh answerer does not receive an offer, inspect `/debug/rooms` and `/debug/events`; do not change media code before proving signaling freshness.
 
 ## Expected CoreS3 serial evidence
@@ -120,7 +127,7 @@ A human still needs to confirm audible sound by ear. If the element plays and RT
 
 ## Duplex diagnostic evidence
 
-With `CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX=y` and `media=audio-duplex`, the browser should additionally log outbound RTP stats and the CoreS3 should log browser audio receive/decode counters.
+With `CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX=y` and `media=audio-duplex` or `media=audio-tone`, the browser should additionally log outbound RTP stats and the CoreS3 should log browser audio receive/decode/speaker-write counters.
 
 Browser:
 
@@ -130,14 +137,23 @@ browser mic acquired tracks=1
 stats outbound audio packets=<n> bytes=<n> evidence=<samples>
 ```
 
+For no-mic environments, the browser generated-tone mode should show:
+
+```text
+media requested audio sendrecv with browser tone source
+browser tone acquired tracks=1 frequency=440
+stats outbound audio packets=<n> bytes=<n> evidence=<samples>
+```
+
 CoreS3:
 
 ```text
 audio rx frames=<n> bytes=<n> empty=<n> pts=<n> pts_delta=<n> pts_discont=<n> last_size=<n>
 audio rx decode samples=<n> invalid=<n> rms=<n> peak=<n> min=<n> max=<n>
+audio rx speaker writes=<n> samples=<n> bytes=<n> drops=<n> short_writes=<n> last_ret=ESP_OK
 ```
 
-This mode is for boundary diagnostics only. It does not enable CoreS3 speaker playback.
+This mode is for boundary diagnostics. A human still needs to confirm speaker audibility by ear; the serial evidence proves the receive/decode/write pipeline, not acoustic output.
 
 ## Boundary table for issue comments
 

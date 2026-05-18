@@ -3,7 +3,7 @@ export function parseProbeConfig(search = globalThis.location?.search ?? '', ori
   const role = params.get('role') === 'answerer' ? 'answerer' : 'offerer';
   const iceTransportPolicy = params.get('icePolicy') === 'relay' ? 'relay' : 'all';
   const requestedMedia = params.get('media') === 'mic' ? 'audio' : params.get('media');
-  const media = ['audio', 'audio-duplex', 'video'].includes(requestedMedia) ? requestedMedia : 'none';
+  const media = ['audio', 'audio-duplex', 'audio-tone', 'video'].includes(requestedMedia) ? requestedMedia : 'none';
 
   return {
     signalBaseUrl: params.get('signal') || origin,
@@ -209,6 +209,26 @@ export async function ensureAudioDuplexSender(peer, stream) {
   return true;
 }
 
+function createBrowserToneStream({ frequency = 440, gain = 0.08 } = {}) {
+  const AudioContextCtor = globalThis.AudioContext ?? globalThis.webkitAudioContext;
+  if (!AudioContextCtor) {
+    throw new Error('Web Audio API is unavailable; cannot create browser tone track');
+  }
+  const context = new AudioContextCtor();
+  const oscillator = context.createOscillator();
+  const gainNode = context.createGain();
+  const destination = context.createMediaStreamDestination();
+  oscillator.frequency.value = frequency;
+  oscillator.type = 'sine';
+  gainNode.gain.value = gain;
+  oscillator.connect(gainNode).connect(destination);
+  oscillator.start();
+  const stream = destination.stream;
+  stream.__stackchanToneContext = context;
+  stream.__stackchanToneOscillator = oscillator;
+  return stream;
+}
+
 function attachRemoteTrack(track, streams) {
   appendLog(`ontrack kind=${track.kind} id=${track.id} state=${track.readyState} muted=${track.muted}`);
   track.onunmute = () => appendLog(`track unmute kind=${track.kind}`);
@@ -247,25 +267,26 @@ async function configureMedia(peer, config) {
   if (config.media === 'audio') {
     peer.addTransceiver('audio', { direction: 'recvonly' });
     appendLog('media requested audio recvonly');
-  } else if (config.media === 'audio-duplex') {
-    appendLog('media requested audio sendrecv');
+  } else if (config.media === 'audio-duplex' || config.media === 'audio-tone') {
+    const useTone = config.media === 'audio-tone';
+    appendLog(useTone ? 'media requested audio sendrecv with browser tone source' : 'media requested audio sendrecv');
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = useTone ? createBrowserToneStream() : await navigator.mediaDevices.getUserMedia({ audio: true });
       const tracks = stream.getAudioTracks();
-      appendLog(`browser mic acquired tracks=${tracks.length}`);
+      appendLog(useTone ? `browser tone acquired tracks=${tracks.length} frequency=440` : `browser mic acquired tracks=${tracks.length}`);
       if (tracks[0]) {
         peer.__stackchanAudioDuplexStream = stream;
         if (config.role === 'answerer') {
-          appendLog('browser mic deferred until remote audio transceiver is available');
+          appendLog(useTone ? 'browser tone deferred until remote audio transceiver is available' : 'browser mic deferred until remote audio transceiver is available');
         } else {
           peer.addTransceiver(tracks[0], { streams: [stream], direction: 'sendrecv' });
         }
       } else {
         peer.addTransceiver('audio', { direction: 'recvonly' });
-        appendLog('browser mic acquired no audio track; falling back to recvonly');
+        appendLog(useTone ? 'browser tone acquired no audio track; falling back to recvonly' : 'browser mic acquired no audio track; falling back to recvonly');
       }
     } catch (error) {
-      appendLog(`browser mic error ${error.name ?? 'Error'} ${error.message}`);
+      appendLog(`${useTone ? 'browser tone' : 'browser mic'} error ${error.name ?? 'Error'} ${error.message}`);
       throw error;
     }
   } else if (config.media === 'video') {
@@ -278,7 +299,7 @@ async function configureMedia(peer, config) {
 
 function startStatsLog(peer, config) {
   if (config.media === 'none') return;
-  const statsKind = config.media === 'audio-duplex' ? 'audio' : config.media;
+  const statsKind = (config.media === 'audio-duplex' || config.media === 'audio-tone') ? 'audio' : config.media;
   setInterval(async () => {
     try {
       const stats = await peer.getStats();

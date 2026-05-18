@@ -57,6 +57,10 @@ describe('browser probe helpers', () => {
     assert.equal(parseProbeConfig('?media=audio-duplex', 'http://127.0.0.1:18090').media, 'audio-duplex');
   });
 
+  it('parses media=audio-tone as a browser-generated outbound audio diagnostic', () => {
+    assert.equal(parseProbeConfig('?media=audio-tone', 'http://127.0.0.1:18090').media, 'audio-tone');
+  });
+
   it('attaches a browser mic track to the remote audio transceiver before creating an answer', async () => {
     const calls = [];
     const track = { kind: 'audio', id: 'mic-1' };
