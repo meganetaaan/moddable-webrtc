@@ -31,6 +31,9 @@
 #define URL_BUF_SIZE 512
 
 #define CORE_S3_ES7210_I2C_ADDR 0x40
+#define CORE_S3_AW88298_I2C_ADDR 0x36
+#define CORE_S3_AW9523_I2C_ADDR 0x58
+#define CORE_S3_AXP2101_I2C_ADDR 0x34
 #define CORE_S3_MIC_SAMPLE_RATE 8000
 #define CORE_S3_MIC_TDM_CHANNELS 4
 #define CORE_S3_SPEAKER_SAMPLE_RATE 8000
@@ -63,6 +66,7 @@ typedef struct {
     bool peer_connected;
     bool local_offer_started;
     bool audio_task_running;
+    bool speaker_amp_enabled;
     i2s_chan_handle_t speaker_tx;
     uint32_t audio_tx_frames;
     uint32_t audio_tx_bytes;
@@ -364,17 +368,204 @@ static int16_t alaw_to_linear16(uint8_t sample)
 }
 
 #if CONFIG_STACKCHAN_MEDIA_CORE_S3_SPEAKER_SINK || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
+static esp_err_t core_s3_i2c_write_reg8(i2c_master_dev_handle_t device, uint8_t reg, uint8_t value)
+{
+    uint8_t data[2] = { reg, value };
+    return i2c_master_transmit(device, data, sizeof(data), pdMS_TO_TICKS(100));
+}
+
+static esp_err_t core_s3_i2c_read_reg8(i2c_master_dev_handle_t device, uint8_t reg, uint8_t *value)
+{
+    if (!value) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return i2c_master_transmit_receive(device, &reg, sizeof(reg), value, sizeof(*value), pdMS_TO_TICKS(100));
+}
+
+static esp_err_t core_s3_aw88298_write_reg(i2c_master_dev_handle_t amp, uint8_t reg, uint16_t value)
+{
+    uint8_t data[3] = { reg, (uint8_t)(value >> 8), (uint8_t)(value & 0xff) };
+    return i2c_master_transmit(amp, data, sizeof(data), pdMS_TO_TICKS(100));
+}
+
+static esp_err_t core_s3_speaker_enable_amp(bool enable)
+{
+    if (app.speaker_amp_enabled == enable) {
+        return ESP_OK;
+    }
+
+    i2c_master_bus_handle_t bus = NULL;
+    i2c_master_dev_handle_t amp = NULL;
+    i2c_master_dev_handle_t expander = NULL;
+    i2c_master_dev_handle_t power = NULL;
+    i2c_master_bus_config_t bus_config = {
+        .i2c_port = I2C_NUM_0,
+        .sda_io_num = CONFIG_STACKCHAN_CORE_S3_MIC_I2C_SDA_GPIO,
+        .scl_io_num = CONFIG_STACKCHAN_CORE_S3_MIC_I2C_SCL_GPIO,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+
+    esp_err_t ret = i2c_new_master_bus(&bus_config, &bus);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "core-s3 speaker amp i2c bus ret=%s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    i2c_device_config_t amp_config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = CORE_S3_AW88298_I2C_ADDR,
+        .scl_speed_hz = 400000,
+    };
+    i2c_device_config_t expander_config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = CORE_S3_AW9523_I2C_ADDR,
+        .scl_speed_hz = 400000,
+    };
+    i2c_device_config_t power_config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = CORE_S3_AXP2101_I2C_ADDR,
+        .scl_speed_hz = 400000,
+    };
+
+    ret = i2c_master_bus_add_device(bus, &amp_config, &amp);
+    if (ret == ESP_OK) {
+        ret = i2c_master_bus_add_device(bus, &expander_config, &expander);
+    }
+    if (ret == ESP_OK) {
+        ret = i2c_master_bus_add_device(bus, &power_config, &power);
+    }
+
+    esp_err_t power_ret = ESP_OK;
+    esp_err_t expander_ret = ESP_ERR_INVALID_STATE;
+    esp_err_t amp_ret = ESP_ERR_INVALID_STATE;
+    uint8_t reg02 = 0;
+    if (ret == ESP_OK) {
+        if (enable) {
+            uint8_t axp90 = 0;
+            power_ret = core_s3_i2c_read_reg8(power, 0x90, &axp90);
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_write_reg8(power, 0x90, axp90 | 0xb4);
+            }
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_write_reg8(power, 0x97, 0x1c);
+            }
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_write_reg8(power, 0x69, 0x35);
+            }
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_write_reg8(power, 0x30, 0x3f);
+            }
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_write_reg8(power, 0x90, 0xbf);
+            }
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_write_reg8(power, 0x94, 0x1c);
+            }
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_write_reg8(power, 0x95, 0x1c);
+            }
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_write_reg8(power, 0x27, 0x00);
+            }
+            uint8_t charge = 0;
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_read_reg8(power, 0x62, &charge);
+            }
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_write_reg8(power, 0x62, (charge & 0xe0) | 13);
+            }
+        }
+        expander_ret = core_s3_i2c_read_reg8(expander, 0x02, &reg02);
+        if (expander_ret == ESP_OK) {
+            uint8_t next = enable ? (reg02 | 0x04) : (reg02 & (uint8_t)~0x04);
+            expander_ret = core_s3_i2c_write_reg8(expander, 0x02, next);
+        }
+        if (enable) {
+            if (power_ret == ESP_OK && expander_ret == ESP_OK) {
+                amp_ret = core_s3_aw88298_write_reg(amp, 0x61, 0x0673); // boost mode disabled
+            }
+            if (amp_ret == ESP_OK) {
+                amp_ret = core_s3_aw88298_write_reg(amp, 0x04, 0x4040); // I2SEN=1 AMPPD=0 PWDN=0
+            }
+            if (amp_ret == ESP_OK) {
+                amp_ret = core_s3_aw88298_write_reg(amp, 0x05, 0x0008); // unmute AGC/DC filters
+            }
+            if (amp_ret == ESP_OK) {
+                amp_ret = core_s3_aw88298_write_reg(amp, 0x06, 0x14c3); // M5Unified 8 kHz-ish rate table + I2S BCK mode
+            }
+            if (amp_ret == ESP_OK) {
+                amp_ret = core_s3_aw88298_write_reg(amp, 0x0c, 0x0064); // full volume
+            }
+        } else {
+            amp_ret = core_s3_aw88298_write_reg(amp, 0x04, 0x4000); // I2SEN=0, keep amp/power domains settled
+        }
+    }
+
+    if (expander) {
+        esp_err_t del_ret = i2c_master_bus_rm_device(expander);
+        if (del_ret != ESP_OK) {
+            ESP_LOGW(TAG, "core-s3 speaker aw9523 remove ret=%s", esp_err_to_name(del_ret));
+        }
+    }
+    if (power) {
+        esp_err_t del_ret = i2c_master_bus_rm_device(power);
+        if (del_ret != ESP_OK) {
+            ESP_LOGW(TAG, "core-s3 speaker axp2101 remove ret=%s", esp_err_to_name(del_ret));
+        }
+    }
+    if (amp) {
+        esp_err_t del_ret = i2c_master_bus_rm_device(amp);
+        if (del_ret != ESP_OK) {
+            ESP_LOGW(TAG, "core-s3 speaker aw88298 remove ret=%s", esp_err_to_name(del_ret));
+        }
+    }
+    esp_err_t bus_del_ret = i2c_del_master_bus(bus);
+    if (bus_del_ret != ESP_OK) {
+        ESP_LOGW(TAG, "core-s3 speaker amp i2c bus cleanup ret=%s", esp_err_to_name(bus_del_ret));
+    }
+
+    esp_err_t effective_ret = ret;
+    if (effective_ret == ESP_OK && power_ret != ESP_OK) {
+        effective_ret = power_ret;
+    }
+    if (effective_ret == ESP_OK && expander_ret != ESP_OK) {
+        effective_ret = expander_ret;
+    }
+    if (effective_ret == ESP_OK) {
+        app.speaker_amp_enabled = enable;
+        if (amp_ret != ESP_OK) {
+            ESP_LOGW(TAG, "core-s3 speaker aw88298 register writes did not ACK; continuing like M5Unified after power/expander enable");
+        }
+    }
+    ESP_LOGI(TAG, "core-s3 speaker amp enable=%d ret=%s aw9523=0x%02x power_ret=%s expander_ret=%s aw88298_ret=%s",
+             enable,
+             esp_err_to_name(effective_ret),
+             reg02,
+             esp_err_to_name(power_ret),
+             esp_err_to_name(expander_ret),
+             esp_err_to_name(amp_ret));
+    return effective_ret;
+}
+
 static esp_err_t core_s3_speaker_i2s_start(void)
 {
     if (app.speaker_tx) {
         return ESP_OK;
     }
 
+    esp_err_t ret = core_s3_speaker_enable_amp(true);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "core-s3 speaker amp start ret=%s", esp_err_to_name(ret));
+        return ret;
+    }
+
     i2s_chan_config_t chan_config = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
     chan_config.dma_desc_num = 4;
     chan_config.dma_frame_num = CORE_S3_SPEAKER_MAX_FRAME_SAMPLES;
 
-    esp_err_t ret = i2s_new_channel(&chan_config, &app.speaker_tx, NULL);
+    ret = i2s_new_channel(&chan_config, &app.speaker_tx, NULL);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "core-s3 speaker i2s new channel ret=%s", esp_err_to_name(ret));
         app.speaker_tx = NULL;
@@ -431,6 +622,10 @@ static void core_s3_speaker_i2s_stop(void)
         ESP_LOGW(TAG, "core-s3 speaker i2s delete ret=%s", esp_err_to_name(del_ret));
     }
     app.speaker_tx = NULL;
+    esp_err_t amp_ret = core_s3_speaker_enable_amp(false);
+    if (amp_ret != ESP_OK) {
+        ESP_LOGW(TAG, "core-s3 speaker amp stop ret=%s", esp_err_to_name(amp_ret));
+    }
     ESP_LOGI(TAG, "core-s3 speaker i2s stopped writes=%u samples=%u bytes=%u drops=%u short_writes=%u",
              (unsigned)app.audio_rx_speaker_write_frames,
              (unsigned)app.audio_rx_speaker_write_samples,
