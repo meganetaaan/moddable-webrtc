@@ -14,8 +14,9 @@ export function parseProbeConfig(search = globalThis.location?.search ?? '', ori
   };
 }
 
-export function buildWsUrl(wssUrl, roomId, clientId) {
-  const url = new URL(wssUrl);
+export function buildWsUrl(wssUrl, roomId, clientId, signalBaseUrl = '') {
+  const url = signalBaseUrl ? new URL('/ws', signalBaseUrl) : new URL(wssUrl);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.searchParams.set('roomId', roomId);
   url.searchParams.set('clientId', clientId);
   return url.toString();
@@ -285,7 +286,7 @@ export async function startBrowserProbe() {
     dataChannel.onmessage = (event) => appendLog(describeDataChannelMessage(event.data));
   }
 
-  ws = new WebSocket(buildWsUrl(joined.wss_url, config.roomId, joined.client_id));
+  ws = new WebSocket(buildWsUrl(joined.wss_url, config.roomId, joined.client_id, config.signalBaseUrl));
   ws.onopen = async () => {
     appendLog('websocket open');
     setStatus('signaling connected');
