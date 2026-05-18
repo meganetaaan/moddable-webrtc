@@ -9,18 +9,22 @@ import {
   formatMediaElementState,
   normalizeRemoteCandidate,
   parseProbeConfig,
+
+  summarizeCandidate,
   summarizeIceCandidate,
+  summarizeIceServers,
   summarizeInboundRtpReport,
+
   summarizeSdpMedia,
   summarizeSelectedCandidatePair,
 } from './browser-probe.js';
 
 describe('browser probe helpers', () => {
   it('parses signaling, room, role, ICE policy, and media from query parameters', () => {
-    const config = parseProbeConfig('?signal=http%3A%2F%2F192.168.7.135%3A18090&room=stackchan&role=answerer&icePolicy=relay&media=audio', 'http://localhost:18090');
+    const config = parseProbeConfig('?signal=http%3A%2F%2F192.168.7.135%3A18091&room=stackchan&role=answerer&icePolicy=relay&media=audio', 'http://localhost:18091');
 
     assert.deepEqual(config, {
-      signalBaseUrl: 'http://192.168.7.135:18090',
+      signalBaseUrl: 'http://192.168.7.135:18091',
       roomId: 'stackchan',
       role: 'answerer',
       iceTransportPolicy: 'relay',
@@ -29,8 +33,8 @@ describe('browser probe helpers', () => {
   });
 
   it('defaults to browser-offerer in the current origin and stackchan room', () => {
-    assert.deepEqual(parseProbeConfig('', 'http://127.0.0.1:18090'), {
-      signalBaseUrl: 'http://127.0.0.1:18090',
+    assert.deepEqual(parseProbeConfig('', 'http://127.0.0.1:18091'), {
+      signalBaseUrl: 'http://127.0.0.1:18091',
       roomId: 'stackchan',
       role: 'offerer',
       iceTransportPolicy: 'all',
@@ -39,7 +43,7 @@ describe('browser probe helpers', () => {
   });
 
   it('ignores unknown media modes', () => {
-    assert.equal(parseProbeConfig('?media=screen', 'http://127.0.0.1:18090').media, 'none');
+    assert.equal(parseProbeConfig('?media=screen', 'http://127.0.0.1:18091').media, 'none');
   });
 
   it('treats media=mic as a browser audio recvonly request', () => {
@@ -109,8 +113,43 @@ describe('browser probe helpers', () => {
 
   it('builds a room/client websocket URL from the AppRTC join response URL', () => {
     assert.equal(
-      buildWsUrl('ws://192.168.7.135:18090/ws', 'stackchan', 'device-1234'),
-      'ws://192.168.7.135:18090/ws?roomId=stackchan&clientId=device-1234',
+      buildWsUrl('ws://192.168.7.135:18091/ws', 'stackchan', 'device-1234'),
+      'ws://192.168.7.135:18091/ws?roomId=stackchan&clientId=device-1234',
+    );
+  });
+
+  it('marks answerer WebSocket URLs as replay-capable without changing firmware URLs', () => {
+    assert.equal(
+      buildWsUrl('wss://stackchan.example/ws', 'stackchan', 'device-phone', { role: 'answerer' }),
+      'wss://stackchan.example/ws?roomId=stackchan&clientId=device-phone&role=answerer',
+    );
+  });
+
+  it('summarizes ICE servers for logs without exposing TURN credentials', () => {
+    const summary = summarizeIceServers([
+      { urls: ['stun:stun.l.google.com:19302'], username: 'unused', credential: 'unused' },
+      {
+        urls: ['turn:turn.example.com:3478?transport=udp', 'turns:secret-user:secret-pass@turn.example.com:5349?transport=tcp'],
+        username: 'turn-user',
+        credential: 'turn-secret',
+      },
+    ]);
+
+    assert.equal(summary.count, 2);
+    assert.deepEqual(summary.urls, [
+      { scheme: 'stun', host: 'stun.l.google.com:19302' },
+      { scheme: 'turn', host: 'turn.example.com:3478' },
+      { scheme: 'turns', host: 'turn.example.com:5349' },
+    ]);
+    assert.equal(JSON.stringify(summary).includes('turn-user'), false);
+    assert.equal(JSON.stringify(summary).includes('turn-secret'), false);
+    assert.equal(JSON.stringify(summary).includes('secret-pass'), false);
+  });
+
+  it('summarizes candidates by type without needing full verbose browser logs', () => {
+    assert.deepEqual(
+      summarizeCandidate('candidate:842163049 1 udp 1677729535 203.0.113.10 59902 typ relay raddr 0.0.0.0 rport 0'),
+      { type: 'relay', protocol: 'udp', address: '203.0.113.10:59902' },
     );
   });
 

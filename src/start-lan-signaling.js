@@ -14,7 +14,7 @@ function firstLanIpv4() {
   return '127.0.0.1';
 }
 
-const port = Number.parseInt(process.env.PORT || '18090', 10);
+const port = Number.parseInt(process.env.PORT || '18091', 10);
 const host = process.env.HOST || '0.0.0.0';
 const lanIp = process.env.LAN_IP || firstLanIpv4();
 const publicBaseUrl = process.env.PUBLIC_BASE_URL || `http://${lanIp}:${port}`;

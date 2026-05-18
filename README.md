@@ -31,21 +31,47 @@ npm test
 ### Run locally
 
 ```bash
-PUBLIC_BASE_URL=http://<windows-or-lan-host-ip>:18090 \
-PORT=18090 \
+PUBLIC_BASE_URL=http://<windows-or-lan-host-ip>:18091 \
+PORT=18091 \
 npm run start:signaling
 ```
+
+For external smartphone checks, expose the same signaling server through a Cloudflare Tunnel and configure TURN relay credentials on the server. `TURN_URLS` is comma-separated and may contain `turn:` and `turns:` URLs. If `TURN_URLS` is unset, `/ice` keeps the default STUN-only response. When `TURN_URLS` is set, the signaling server returns TURN before the default STUN entry because the CoreS3 AppRTC firmware path only consumes the first ICE server URL. Use `TURN_USERNAME`/`TURN_CREDENTIAL` for long-term credentials, or `TURN_SECRET` for coturn REST-style time-limited credentials. If a phone logs `icecandidateerror ... code=701 ... host lookup`, emit IP-literal `turn:` URLs for that test run to bypass the phone/network DNS failure; avoid IP-literal `turns:` because TLS certificate names will not match.
+
+The signaling server retains only the latest fresh connected offerer's `offer` in each room and replays it once to a later `role=answerer` WebSocket client. When an answer arrives, that offer is marked consumed and is not replayed to another phone. If a later answerer joins without a fresh offer, the server sends `{ "type": "reoffer-request", "reason": "no-fresh-offer" }` to the connected offerer so firmware can close the stale peer and publish a new offer.
+
+When the server is reached through both LAN and a Cloudflare Tunnel, `/join` advertises WebSocket and HTTP fallback URLs from the request host/forwarded headers. That keeps CoreS3 on plain LAN `ws://<lan-ip>:18091/ws` while phones that arrive through the tunnel receive `wss://<tunnel-host>/ws`.
+
+```bash
+PUBLIC_BASE_URL=https://stackchan.example.trycloudflare.com \
+TURN_URLS='turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349?transport=tcp' \
+TURN_USERNAME='example-user' \
+TURN_CREDENTIAL='example-secret' \
+npm run start:signaling
+```
+
+For coturn static-auth-secret / TURN REST API style credentials:
+
+```bash
+PUBLIC_BASE_URL=https://stackchan.example.trycloudflare.com \
+TURN_URLS='turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349?transport=tcp' \
+TURN_SECRET='example-shared-secret' \
+TURN_TTL_SECONDS=86400 \
+npm run start:signaling
+```
+
+For Metered TURN, create or select a TURN credential in the dashboard, then use the credential's `username` and `password` as `TURN_USERNAME` and `TURN_CREDENTIAL`. The Dashboard Developers `secretKey` is only for server-side credential management; the `/api/v1/turn/credentials` endpoint requires the credential-scoped `apiKey` and returns the ICE servers array. Free accounts may need the `Free Trial Global: 500MB` TURN plan before credential creation and usage APIs are enabled.
 
 Or let the helper choose the first non-loopback IPv4 address and print the exact audio probe URL:
 
 ```bash
-PORT=18090 ROOM=stackchan npm run start:lan-signaling
+PORT=18091 ROOM=stackchan npm run start:lan-signaling
 ```
 
 For the CoreS3/Stack-chan firmware, use the same host and port in the AppRTC signaling URL, for example:
 
 ```text
-http://192.168.7.135:18090
+http://192.168.7.135:18091
 ```
 
 On WSL2, keep the boundary explicit:
@@ -58,11 +84,11 @@ On WSL2, keep the boundary explicit:
 ### Debug endpoints
 
 ```bash
-curl -X POST http://127.0.0.1:18090/join/stackchan
-curl http://127.0.0.1:18090/ice
-curl http://127.0.0.1:18090/ping
-curl http://127.0.0.1:18090/debug/rooms
-curl http://127.0.0.1:18090/debug/events
+curl -X POST http://127.0.0.1:18091/join/stackchan
+curl http://127.0.0.1:18091/ice
+curl http://127.0.0.1:18091/ping
+curl http://127.0.0.1:18091/debug/rooms
+curl http://127.0.0.1:18091/debug/events
 ```
 
 `/debug/events` keeps a bounded in-memory trace of recent signaling activity. It records joins, WebSocket connects/closes, and compact message summaries such as `offer` SDP length or a truncated ICE candidate prefix. Use it before debugging ESP WebRTC internals:
@@ -77,13 +103,19 @@ curl http://127.0.0.1:18090/debug/events
 After the signaling server is running, open the browser probe from the same server:
 
 ```text
-http://127.0.0.1:18090/probe?room=stackchan&role=offerer&icePolicy=all&media=audio
+http://127.0.0.1:18091/probe?room=stackchan&role=offerer&icePolicy=all&media=audio
 ```
 
 For CoreS3/Stack-chan LAN checks, use the Windows/LAN host address that the device can reach:
 
 ```text
-http://192.168.7.135:18090/probe?signal=http://192.168.7.135:18090&room=stackchan&role=offerer&icePolicy=all&media=audio
+http://192.168.7.135:18091/probe?signal=http://192.168.7.135:18091&room=stackchan&role=offerer&icePolicy=all&media=audio
+```
+
+For smartphone relay checks through the tunnel, force relay candidates and point the probe at the public signaling URL:
+
+```text
+https://stackchan.example.trycloudflare.com/probe?signal=https://stackchan.example.trycloudflare.com&room=stackchan&role=answerer&icePolicy=relay&media=audio
 ```
 
 The probe joins the room, opens `/ws`, creates a DataChannel in browser-offerer mode, optionally adds one `recvonly` media transceiver with `media=audio` or `media=video`, sends an SDP offer, and sends ICE candidates as raw candidate lines in AppRTC-style messages:
@@ -97,6 +129,10 @@ The probe joins the room, opens `/ws`, creates a DataChannel in browser-offerer 
 }
 ```
 
+For the ESP-offerer firmware mode, open the same URL with `role=answerer`; the browser will answer the CoreS3 SDP offer, open a browser-originated DataChannel, send a ping, and log the CoreS3 pong.
+
+When `/ice` includes TURN credentials, the browser probe logs only the ICE policy plus URL schemes and hosts. It does not print TURN usernames or credentials.
+
 This keeps the next boundary narrow:
 
 1. Start the signaling server with `PUBLIC_BASE_URL` set to the LAN-reachable URL.
@@ -109,6 +145,8 @@ This keeps the next boundary narrow:
 
 The native-only issue #8/#9 scaffold lives in `firmware/esp-idf-datachannel/`.
 
-It joins the same AppRTC signaling server, opens the advertised `/ws`, forwards browser-offerer `offer` and raw `candidate` messages into `esp_peer`, logs `esp_peer_open` / `esp_peer_send_msg` return codes and heap boundaries, replies to DataChannel ping with a tiny pong if SCTP opens, and can negotiate a send-only generated PCMA 440 Hz tone test source or guarded CoreS3 ES7210 mic source for browser `ontrack`/RTP counter evidence.
+
+It joins the same AppRTC signaling server, opens the advertised `/ws`, can either answer a browser offer or create an ESP offer, forwards raw `candidate` messages into `esp_peer`, logs `esp_peer_open` / `esp_peer_send_msg` return codes and heap boundaries, replies to DataChannel ping with a tiny pong if SCTP opens, and can negotiate a send-only generated PCMA 440 Hz tone test source or guarded CoreS3 ES7210 mic source for browser `ontrack`/RTP counter evidence.
+
 
 Audio was chosen before video because `esp_peer` directly supports G.711 A-law audio frames and browsers can receive PCMA without CoreS3 camera/H.264 plumbing. The mic source is currently a narrow raw I2S bridge aligned to Espressif's `esp_capture` contract where possible; the intended robust follow-up is adopting `esp_capture` and passing acquired frame `pts/data/size` directly into `esp_peer_send_audio()`. See `firmware/esp-idf-datachannel/README.md` for menuconfig fields, hardware run steps, resource metrics, fallback plan, and the boundary table for the next CoreS3 run.

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import WebSocket from 'ws';
 
-import { createSignalingServer, isDirectRun } from './apprtc-signal.js';
+import { createSignalingServer, iceServersFromEnv, isDirectRun } from './apprtc-signal.js';
 
 async function readJson(response) {
   return JSON.parse(await response.text());
@@ -47,6 +47,24 @@ function waitForMessage(socket) {
   });
 }
 
+function waitForMessageWithin(socket, milliseconds = 300) {
+  return Promise.race([
+    waitForMessage(socket),
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out waiting for websocket message after ${milliseconds}ms`)), milliseconds)),
+  ]);
+}
+
+function closeSocket(socket) {
+  return new Promise((resolve) => {
+    if (socket.readyState === WebSocket.CLOSED) {
+      resolve();
+      return;
+    }
+    socket.once('close', resolve);
+    socket.close();
+  });
+}
+
 describe('AppRTC-compatible signaling server', () => {
   it('detects direct CLI execution when Node receives a relative script path', () => {
     assert.equal(isDirectRun(new URL('./apprtc-signal.js', import.meta.url).href, 'src/apprtc-signal.js'), true);
@@ -58,7 +76,7 @@ describe('AppRTC-compatible signaling server', () => {
   let baseUrl;
 
   beforeEach(async () => {
-    app = createSignalingServer({ publicBaseUrl: 'http://device-host.test:18090' });
+    app = createSignalingServer({ publicBaseUrl: 'http://device-host.test:18091' });
     baseUrl = await listen(app);
   });
 
@@ -72,11 +90,11 @@ describe('AppRTC-compatible signaling server', () => {
 
     assert.equal(first.result, 'SUCCESS');
     assert.equal(first.params.room_id, 'stackchan');
-    assert.match(first.params.client_id, /^device-/);
+    assert.match(first.params.client_id, /^device-[0-9a-f]{8}$/);
     assert.equal(first.params.is_initiator, 'true');
-    assert.equal(first.params.wss_url, 'ws://device-host.test:18090/ws');
-    assert.equal(first.params.wss_post_url, `http://device-host.test:18090/message/stackchan/${first.params.client_id}`);
-    assert.equal(first.params.ice_server_url, 'http://device-host.test:18090/ice');
+    assert.equal(first.params.wss_url, 'ws://device-host.test:18091/ws');
+    assert.equal(first.params.wss_post_url, `http://device-host.test:18091/message/stackchan/${first.params.client_id}`);
+    assert.equal(first.params.ice_server_url, 'http://device-host.test:18091/ice');
     assert.deepEqual(first.params.pc_config, {
       iceServers: [{ urls: ['stun:stun.l.google.com:19302'], username: 'unused', credential: 'unused' }],
     });
@@ -86,6 +104,28 @@ describe('AppRTC-compatible signaling server', () => {
     assert.equal(second.params.is_initiator, 'false');
   });
 
+  it('advertises request-local websocket URLs for LAN firmware clients and forwarded tunnel URLs for phones', async () => {
+    const lan = await readJson(await fetch(`${baseUrl}/join/stackchan`, {
+      method: 'POST',
+      headers: {
+        'x-forwarded-proto': 'http',
+        'x-forwarded-host': '192.168.7.135:18091',
+      },
+    }));
+    assert.equal(lan.params.wss_url, 'ws://192.168.7.135:18091/ws');
+    assert.equal(lan.params.wss_post_url, `http://192.168.7.135:18091/message/stackchan/${lan.params.client_id}`);
+
+    const tunnel = await readJson(await fetch(`${baseUrl}/join/stackchan`, {
+      method: 'POST',
+      headers: {
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': 'velvet-lottery-purpose-gossip.trycloudflare.com',
+      },
+    }));
+    assert.equal(tunnel.params.wss_url, 'wss://velvet-lottery-purpose-gossip.trycloudflare.com/ws');
+    assert.equal(tunnel.params.ice_server_url, 'https://velvet-lottery-purpose-gossip.trycloudflare.com/ice');
+  });
+
   it('serves configurable ICE metadata in AppRTC shape', async () => {
     const ice = await readJson(await fetch(`${baseUrl}/ice`));
 
@@ -93,6 +133,68 @@ describe('AppRTC-compatible signaling server', () => {
     assert.deepEqual(ice.iceServers, [
       { urls: ['stun:stun.l.google.com:19302'], username: 'unused', credential: 'unused' },
     ]);
+  });
+
+  it('adds TURN servers from environment config before the default STUN server for firmware parsers', async () => {
+    await app.close();
+    app = createSignalingServer({
+      publicBaseUrl: 'http://device-host.test:18091',
+      env: {
+        TURN_URLS: 'turn:turn.example.com:3478?transport=udp, turns:turn.example.com:5349?transport=tcp',
+        TURN_USERNAME: 'test-user',
+        TURN_CREDENTIAL: 'test-secret',
+      },
+    });
+    baseUrl = await listen(app);
+
+    const ice = await readJson(await fetch(`${baseUrl}/ice`));
+
+    assert.deepEqual(ice, {
+      result: 'SUCCESS',
+      iceServers: [
+        {
+          urls: ['turn:turn.example.com:3478?transport=udp', 'turns:turn.example.com:5349?transport=tcp'],
+          username: 'test-user',
+          credential: 'test-secret',
+        },
+        { urls: ['stun:stun.l.google.com:19302'], username: 'unused', credential: 'unused' },
+      ],
+    });
+  });
+
+  it('uses the same TURN ICE config in join pc_config and /ice', async () => {
+    await app.close();
+    app = createSignalingServer({
+      publicBaseUrl: 'http://device-host.test:18091',
+      env: {
+        TURN_URLS: 'turn:relay.test:3478?transport=udp',
+        TURN_USERNAME: 'join-user',
+        TURN_CREDENTIAL: 'join-secret',
+      },
+    });
+    baseUrl = await listen(app);
+
+    const ice = await readJson(await fetch(`${baseUrl}/ice`));
+    const joined = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+
+    assert.deepEqual(joined.params.pc_config.iceServers, ice.iceServers);
+  });
+
+  it('can derive coturn REST-style time-limited credentials from TURN_SECRET', () => {
+    const iceServers = iceServersFromEnv(
+      {
+        TURN_URLS: 'turn:staticauth.openrelay.metered.ca:80?transport=udp',
+        TURN_SECRET: 'openrelayprojectsecret',
+        TURN_TTL_SECONDS: '60',
+      },
+      1_770_000_000_000,
+    );
+
+    assert.deepEqual(iceServers[0], {
+      urls: ['turn:staticauth.openrelay.metered.ca:80?transport=udp'],
+      username: '1770000060',
+      credential: 'ayJEUjsOg9J0J39G4Qncq7CqZlY=',
+    });
   });
 
   it('serves a tiny reachability ping for firmware TCP/HTTP checks', async () => {
@@ -117,11 +219,12 @@ describe('AppRTC-compatible signaling server', () => {
       leaked = true;
     });
 
-    socketA.send(JSON.stringify({ type: 'offer', sdp: 'v=0...' }));
+    const offer = { type: 'offer', sdp: 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n' };
+    socketA.send(JSON.stringify(offer));
 
     assert.deepEqual(await receivedByB, {
       from: a.params.client_id,
-      message: { type: 'offer', sdp: 'v=0...' },
+      message: offer,
     });
 
     await new Promise((resolve) => setTimeout(resolve, 30));
@@ -132,6 +235,101 @@ describe('AppRTC-compatible signaling server', () => {
     socketOther.close();
   });
 
+  it('replays one fresh offer to a single answerer and then consumes it after an answer', async () => {
+    const esp = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const socketEsp = new WebSocket(wsUrl(baseUrl, 'stackchan', esp.params.client_id));
+    await waitForOpen(socketEsp);
+
+    const offer = { type: 'offer', sdp: 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n' };
+    socketEsp.send(JSON.stringify(offer));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const phone = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const phoneUrl = new URL(wsUrl(baseUrl, 'stackchan', phone.params.client_id));
+    phoneUrl.searchParams.set('role', 'answerer');
+    const socketPhone = new WebSocket(phoneUrl);
+    const replayPromise = waitForMessageWithin(socketPhone);
+    await waitForOpen(socketPhone);
+
+    assert.deepEqual(await replayPromise, {
+      from: esp.params.client_id,
+      message: offer,
+    });
+
+    const receivedAnswer = waitForMessage(socketEsp);
+    socketPhone.send(JSON.stringify({ type: 'answer', sdp: 'v=0\r\na=setup:active\r\n' }));
+    assert.deepEqual(await receivedAnswer, {
+      from: phone.params.client_id,
+      message: { type: 'answer', sdp: 'v=0\r\na=setup:active\r\n' },
+    });
+
+    const laterPhone = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const laterPhoneUrl = new URL(wsUrl(baseUrl, 'stackchan', laterPhone.params.client_id));
+    laterPhoneUrl.searchParams.set('role', 'answerer');
+    const reofferRequestPromise = waitForMessageWithin(socketEsp);
+    const socketLaterPhone = new WebSocket(laterPhoneUrl);
+    await waitForOpen(socketLaterPhone);
+
+    const reofferRequest = await reofferRequestPromise;
+    assert.deepEqual(reofferRequest, {
+      from: laterPhone.params.client_id,
+      message: { type: 'reoffer-request', reason: 'no-fresh-offer' },
+    });
+    await assert.rejects(waitForMessageWithin(socketLaterPhone, 80), /timed out waiting/);
+
+    const { events } = await readJson(await fetch(`${baseUrl}/debug/events`));
+    assert.ok(events.some((event) => event.event === 'replay' && event.clientId === phone.params.client_id && event.from === esp.params.client_id));
+    assert.ok(events.some((event) => event.event === 'offer-consumed' && event.clientId === phone.params.client_id && event.from === esp.params.client_id));
+    assert.ok(events.some((event) => event.event === 'reoffer-request' && event.clientId === laterPhone.params.client_id && event.to === esp.params.client_id));
+
+    await Promise.all([closeSocket(socketEsp), closeSocket(socketPhone), closeSocket(socketLaterPhone)]);
+  });
+
+  it('ignores later offer messages without media so they do not break an active answerer', async () => {
+    const esp = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const phone = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const socketEsp = new WebSocket(wsUrl(baseUrl, 'stackchan', esp.params.client_id));
+    const phoneUrl = new URL(wsUrl(baseUrl, 'stackchan', phone.params.client_id));
+    phoneUrl.searchParams.set('role', 'answerer');
+    const socketPhone = new WebSocket(phoneUrl);
+    await Promise.all([waitForOpen(socketEsp), waitForOpen(socketPhone)]);
+
+    const validOffer = { type: 'offer', sdp: 'v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 8\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n' };
+    const receivedValidOffer = waitForMessage(socketPhone);
+    socketEsp.send(JSON.stringify(validOffer));
+    assert.deepEqual(await receivedValidOffer, { from: esp.params.client_id, message: validOffer });
+
+    let leaked = false;
+    socketPhone.once('message', () => {
+      leaked = true;
+    });
+    socketEsp.send(JSON.stringify({ type: 'offer', sdp: 'v=0\r\n' }));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(leaked, false);
+
+    const { events } = await readJson(await fetch(`${baseUrl}/debug/events`));
+    assert.ok(events.some((event) => event.event === 'ignore' && event.reason === 'offer-without-media' && event.clientId === esp.params.client_id));
+
+    await Promise.all([closeSocket(socketEsp), closeSocket(socketPhone)]);
+  });
+
+  it('does not replay an old offer to a later offerer-style client such as a reconnecting CoreS3', async () => {
+    const oldEsp = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const socketOldEsp = new WebSocket(wsUrl(baseUrl, 'stackchan', oldEsp.params.client_id));
+    await waitForOpen(socketOldEsp);
+    socketOldEsp.send(JSON.stringify({ type: 'offer', sdp: 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nold-offer\r\n' }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const newEsp = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
+    const socketNewEsp = new WebSocket(wsUrl(baseUrl, 'stackchan', newEsp.params.client_id));
+    await waitForOpen(socketNewEsp);
+
+    await assert.rejects(waitForMessageWithin(socketNewEsp, 80), /timed out waiting/);
+
+    socketOldEsp.close();
+    socketNewEsp.close();
+  });
+
   it('relays messages posted to the advertised HTTP fallback URL', async () => {
     const a = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
     const b = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
@@ -139,7 +337,7 @@ describe('AppRTC-compatible signaling server', () => {
     await waitForOpen(socketB);
 
     const receivedByB = waitForMessage(socketB);
-    const response = await fetch(a.params.wss_post_url.replace('http://device-host.test:18090', baseUrl), {
+    const response = await fetch(a.params.wss_post_url.replace('http://device-host.test:18091', baseUrl), {
       method: 'POST',
       body: JSON.stringify({ type: 'candidate', candidate: 'candidate:1 1 udp ...' }),
     });
@@ -192,8 +390,10 @@ describe('AppRTC-compatible signaling server', () => {
           {
             clientId: joined.params.client_id,
             connected: false,
+            role: null,
           },
         ],
+        latestOffer: null,
       },
     });
   });
@@ -206,11 +406,11 @@ describe('AppRTC-compatible signaling server', () => {
     await Promise.all([waitForOpen(socketA), waitForOpen(socketB)]);
 
     const receivedOffer = waitForMessage(socketB);
-    socketA.send(JSON.stringify({ type: 'offer', sdp: 'v=0\r\na=setup:actpass\r\n' }));
+    socketA.send(JSON.stringify({ type: 'offer', sdp: 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=setup:actpass\r\n' }));
     await receivedOffer;
 
     const receivedCandidate = waitForMessage(socketB);
-    await fetch(a.params.wss_post_url.replace('http://device-host.test:18090', baseUrl), {
+    await fetch(a.params.wss_post_url.replace('http://device-host.test:18091', baseUrl), {
       method: 'POST',
       body: JSON.stringify({ type: 'candidate', candidate: 'candidate:1 1 udp 2122260223 192.0.2.1 54545 typ host generation 0' }),
     });
@@ -253,13 +453,14 @@ describe('AppRTC-compatible signaling server', () => {
       { event: 'message', roomId: 'stackchan', clientId: a.params.client_id, transport: 'http' },
       { event: 'relay', roomId: 'stackchan', clientId: a.params.client_id, transport: 'http' },
       { event: 'message', roomId: 'stackchan', clientId: b.params.client_id, transport: 'websocket' },
+      { event: 'offer-consumed', roomId: 'stackchan', clientId: b.params.client_id, transport: undefined },
       { event: 'relay', roomId: 'stackchan', clientId: b.params.client_id, transport: 'websocket' },
       { event: 'close', roomId: 'stackchan', clientId: a.params.client_id, transport: undefined },
     ]);
 
     const messageEvents = events.filter((event) => event.event === 'message');
     assert.deepEqual(messageEvents.map((event) => event.message), [
-      { type: 'offer', sdpLength: 22, media: [] },
+      { type: 'offer', sdpLength: 72, media: ['m=application 9 UDP/DTLS/SCTP webrtc-datachannel'] },
       { type: 'candidate', candidate: 'candidate:1 1 udp 2122260223 192.0.2.1 54545 typ host generation...' },
       { type: 'answer', sdpLength: 21, media: [] },
     ]);

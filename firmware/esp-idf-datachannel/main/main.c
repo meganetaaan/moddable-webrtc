@@ -28,12 +28,14 @@
 #define WIFI_FAIL_BIT BIT1
 #define HTTP_BUF_SIZE 8192
 #define URL_BUF_SIZE 512
+
 #define CORE_S3_ES7210_I2C_ADDR 0x40
 #define CORE_S3_MIC_SAMPLE_RATE 8000
 #define CORE_S3_MIC_TDM_CHANNELS 4
 #define CORE_S3_MIC_FRAME_DURATION_MS ((CONFIG_STACKCHAN_CORE_S3_MIC_FRAME_SAMPLES * 1000U) / CORE_S3_MIC_SAMPLE_RATE)
 #define AUDIO_TEST_TONE_HZ 440U
 #define AUDIO_TEST_TONE_AMPLITUDE 10000
+
 
 static const char *TAG = "stackchan_dc";
 static EventGroupHandle_t wifi_events;
@@ -46,11 +48,16 @@ typedef struct {
     char client_id[96];
     char wss_url[URL_BUF_SIZE];
     char ws_url[URL_BUF_SIZE];
+    char ice_url[URL_BUF_SIZE];
+    char ice_user[128];
+    char ice_password[128];
+    esp_peer_ice_server_cfg_t ice_servers[1];
     bool is_initiator;
     esp_websocket_client_handle_t ws;
     esp_peer_handle_t peer;
     bool peer_loop_running;
     bool peer_connected;
+    bool local_offer_started;
     bool audio_task_running;
     uint32_t audio_tx_frames;
     uint32_t audio_tx_bytes;
@@ -171,6 +178,47 @@ static bool json_bool_string(cJSON *object, const char *name)
     return value && strcmp(value, "true") == 0;
 }
 
+static const char *json_first_url(cJSON *object, const char *name)
+{
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(object, name);
+    if (cJSON_IsString(item)) {
+        return item->valuestring;
+    }
+    if (cJSON_IsArray(item)) {
+        cJSON *first = cJSON_GetArrayItem(item, 0);
+        if (cJSON_IsString(first)) {
+            return first->valuestring;
+        }
+    }
+    return NULL;
+}
+
+static void parse_first_ice_server(cJSON *params)
+{
+    cJSON *pc_config = cJSON_GetObjectItemCaseSensitive(params, "pc_config");
+    cJSON *ice_servers = cJSON_GetObjectItemCaseSensitive(pc_config, "iceServers");
+    cJSON *first = cJSON_GetArrayItem(ice_servers, 0);
+    const char *url = json_first_url(first, "urls");
+    if (!url) {
+        app.ice_url[0] = '\0';
+        ESP_LOGW(TAG, "join response did not include pc_config.iceServers[0].urls");
+        return;
+    }
+
+    const char *user = json_string(first, "username");
+    const char *credential = json_string(first, "credential");
+    strlcpy(app.ice_url, url, sizeof(app.ice_url));
+    strlcpy(app.ice_user, user ? user : "", sizeof(app.ice_user));
+    strlcpy(app.ice_password, credential ? credential : "", sizeof(app.ice_password));
+    app.ice_servers[0].stun_url = app.ice_url;
+    app.ice_servers[0].user = app.ice_user;
+    app.ice_servers[0].psw = app.ice_password;
+    ESP_LOGI(TAG, "ice server[0] url=%s user_set=%d credential_len=%u",
+             app.ice_url,
+             app.ice_user[0] != '\0',
+             (unsigned)strlen(app.ice_password));
+}
+
 static void send_signaling_json(cJSON *message)
 {
     if (!app.ws || !message) {
@@ -205,7 +253,14 @@ static bool bytes_contain(const uint8_t *haystack, size_t haystack_len, const ch
 
 static int peer_msg_callback(esp_peer_msg_t *msg, void *ctx)
 {
-    const char *type = msg->type == ESP_PEER_MSG_TYPE_SDP ? "answer" : "candidate";
+    const char *type = "candidate";
+    if (msg->type == ESP_PEER_MSG_TYPE_SDP) {
+#if CONFIG_STACKCHAN_PEER_ROLE_ESP_OFFERER
+        type = "offer";
+#else
+        type = "answer";
+#endif
+    }
     ESP_LOGI(TAG, "peer on_msg(%s) bytes=%u", type, (unsigned)msg->size);
 
     cJSON *root = cJSON_CreateObject();
@@ -326,6 +381,7 @@ static void peer_loop_task(void *arg)
     vTaskDelete(NULL);
 }
 
+
 static void log_audio_tx_result(const char *source, uint32_t sent_bytes, uint32_t pts, int ret)
 {
     uint32_t pts_delta = app.audio_tx_frames ? pts - app.audio_tx_last_pts : 0;
@@ -364,7 +420,7 @@ static void log_audio_tx_result(const char *source, uint32_t sent_bytes, uint32_
     }
 }
 
-static uint8_t pcm16_to_alaw(int16_t sample)
+static uint8_t linear16_to_alaw(int16_t sample)
 {
     const uint16_t segment_end[8] = { 0x1f, 0x3f, 0x7f, 0xff, 0x1ff, 0x3ff, 0x7ff, 0xfff };
     uint16_t pcm;
@@ -381,12 +437,14 @@ static uint8_t pcm16_to_alaw(int16_t sample)
     }
     pcm >>= 3;
 
+
     while (segment < 8 && pcm > segment_end[segment]) {
         segment++;
     }
     if (segment >= 8) {
         return 0x7f ^ mask;
     }
+
 
     aval = segment << 4;
     if (segment < 2) {
@@ -398,14 +456,15 @@ static uint8_t pcm16_to_alaw(int16_t sample)
 }
 
 #if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
-static void fill_audio_test_tone_frame(uint8_t *frame, size_t frame_size, uint32_t *phase)
+static void generate_pcma_tone_frame(uint8_t *frame, size_t frame_size)
 {
+    static uint32_t phase;
     for (size_t i = 0; i < frame_size; i++) {
-        int16_t sample = *phase < (CORE_S3_MIC_SAMPLE_RATE / 2U) ? AUDIO_TEST_TONE_AMPLITUDE : -AUDIO_TEST_TONE_AMPLITUDE;
-        frame[i] = pcm16_to_alaw(sample);
-        *phase += AUDIO_TEST_TONE_HZ;
-        while (*phase >= CORE_S3_MIC_SAMPLE_RATE) {
-            *phase -= CORE_S3_MIC_SAMPLE_RATE;
+        int16_t sample = phase < (CORE_S3_MIC_SAMPLE_RATE / 2U) ? AUDIO_TEST_TONE_AMPLITUDE : -AUDIO_TEST_TONE_AMPLITUDE;
+        frame[i] = linear16_to_alaw(sample);
+        phase += AUDIO_TEST_TONE_HZ;
+        while (phase >= CORE_S3_MIC_SAMPLE_RATE) {
+            phase -= CORE_S3_MIC_SAMPLE_RATE;
         }
     }
 }
@@ -413,9 +472,10 @@ static void fill_audio_test_tone_frame(uint8_t *frame, size_t frame_size, uint32
 static void audio_test_task(void *arg)
 {
     uint8_t frame[CONFIG_STACKCHAN_AUDIO_TEST_FRAME_BYTES];
+
     uint32_t pts = 0;
-    uint32_t tone_phase = 0;
     ESP_LOGI(TAG, "audio test source start codec=PCMA sample_rate=8000 channel=1 frame_bytes=%u interval_ms=%u tone_hz=%u",
+
              (unsigned)sizeof(frame),
              (unsigned)CONFIG_STACKCHAN_AUDIO_TEST_INTERVAL_MS,
              (unsigned)AUDIO_TEST_TONE_HZ);
@@ -423,7 +483,9 @@ static void audio_test_task(void *arg)
 
     while (app.audio_task_running) {
         if (app.peer && app.peer_connected) {
-            fill_audio_test_tone_frame(frame, sizeof(frame), &tone_phase);
+
+            generate_pcma_tone_frame(frame, sizeof(frame));
+
             esp_peer_audio_frame_t audio = {
                 .pts = pts,
                 .data = frame,
@@ -768,6 +830,60 @@ static const char *configured_media_mode(void)
 #endif
 }
 
+static esp_peer_role_t configured_peer_role(void)
+{
+#if CONFIG_STACKCHAN_PEER_ROLE_ESP_OFFERER
+    return ESP_PEER_ROLE_CONTROLLING;
+#else
+    return ESP_PEER_ROLE_CONTROLLED;
+#endif
+}
+
+static const char *configured_peer_role_name(void)
+{
+#if CONFIG_STACKCHAN_PEER_ROLE_ESP_OFFERER
+    return "esp-offerer";
+#else
+    return "browser-offerer";
+#endif
+}
+
+static void start_local_offer(void);
+
+static void close_peer_for_reoffer(void)
+{
+    if (!app.peer) {
+        app.local_offer_started = false;
+        app.peer_connected = false;
+        return;
+    }
+
+    ESP_LOGI(TAG, "closing stale peer before reoffer");
+#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
+    app.audio_task_running = false;
+#endif
+    app.peer_loop_running = false;
+    vTaskDelay(pdMS_TO_TICKS(80));
+    int ret = esp_peer_close(app.peer);
+    ESP_LOGI(TAG, "esp_peer_close ret=%d", ret);
+    app.peer = NULL;
+    app.peer_connected = false;
+    app.local_offer_started = false;
+    app.data_stream_id = 0;
+    log_heap("after-peer-close");
+}
+
+static void handle_reoffer_request(void)
+{
+#if CONFIG_STACKCHAN_PEER_ROLE_ESP_OFFERER
+    ESP_LOGI(TAG, "signaling reoffer-request: recreate peer and publish fresh offer");
+    close_peer_for_reoffer();
+    start_local_offer();
+#else
+    ESP_LOGW(TAG, "ignore reoffer-request while configured as browser-offerer answerer");
+#endif
+}
+
 static esp_err_t ensure_peer_open(void)
 {
     if (app.peer) {
@@ -775,7 +891,8 @@ static esp_err_t ensure_peer_open(void)
     }
 
     log_heap("before-peer-open");
-    ESP_LOGI(TAG, "media mode=%s audio_dir=%d video_dir=%d",
+    ESP_LOGI(TAG, "peer role=%s media mode=%s audio_dir=%d video_dir=%d",
+             configured_peer_role_name(),
              configured_media_mode(),
              configured_audio_dir(),
              ESP_PEER_MEDIA_DIR_NONE);
@@ -784,7 +901,7 @@ static esp_err_t ensure_peer_open(void)
 #endif
 
     peer_default_cfg = (esp_peer_default_cfg_t) {
-        .agent_recv_timeout = 100,
+        .agent_recv_timeout = CONFIG_STACKCHAN_AGENT_RECV_TIMEOUT_MS,
         .data_ch_cfg = {
             .recv_cache_size = 1536,
             .send_cache_size = 1536,
@@ -799,7 +916,9 @@ static esp_err_t ensure_peer_open(void)
     };
 
     esp_peer_cfg_t cfg = {
-        .role = ESP_PEER_ROLE_CONTROLLED,
+        .server_lists = app.ice_url[0] ? app.ice_servers : NULL,
+        .server_num = app.ice_url[0] ? 1 : 0,
+        .role = configured_peer_role(),
         .ice_trans_policy = ESP_PEER_ICE_TRANS_POLICY_ALL,
         .audio_info = {
             .codec = ESP_PEER_AUDIO_CODEC_G711A,
@@ -822,6 +941,11 @@ static esp_err_t ensure_peer_open(void)
         .on_data = peer_data_callback,
         .on_channel_close = peer_channel_close_callback,
     };
+
+    ESP_LOGI(TAG, "peer agent_recv_timeout_ms=%u", (unsigned)CONFIG_STACKCHAN_AGENT_RECV_TIMEOUT_MS);
+    ESP_LOGI(TAG, "peer ICE server_num=%u first_url=%s",
+             (unsigned)cfg.server_num,
+             cfg.server_num ? app.ice_url : "(none)");
 
     int ret = esp_peer_open(&cfg, esp_peer_get_default_impl(), &app.peer);
     ESP_LOGI(TAG, "esp_peer_open ret=%d peer=%p", ret, app.peer);
@@ -860,6 +984,23 @@ static esp_err_t ensure_peer_open(void)
     return ESP_OK;
 }
 
+static void start_local_offer(void)
+{
+#if CONFIG_STACKCHAN_PEER_ROLE_ESP_OFFERER
+    if (app.local_offer_started) {
+        return;
+    }
+    if (ensure_peer_open() != ESP_OK) {
+        return;
+    }
+    app.local_offer_started = true;
+    log_heap("before-esp_peer_new_connection");
+    int ret = esp_peer_new_connection(app.peer);
+    ESP_LOGI(TAG, "esp_peer_new_connection ret=%d", ret);
+    log_heap("after-esp_peer_new_connection");
+#endif
+}
+
 static void forward_to_peer(const char *type, const char *data, size_t size)
 {
     if (!type || !data || size == 0) {
@@ -868,6 +1009,12 @@ static void forward_to_peer(const char *type, const char *data, size_t size)
     }
     if (ensure_peer_open() != ESP_OK) {
         return;
+    }
+    if ((strcmp(type, "offer") == 0 && configured_peer_role() == ESP_PEER_ROLE_CONTROLLING) ||
+        (strcmp(type, "answer") == 0 && configured_peer_role() == ESP_PEER_ROLE_CONTROLLED)) {
+        ESP_LOGW(TAG, "signaling SDP type=%s does not match configured peer role=%s",
+                 type,
+                 configured_peer_role_name());
     }
 
     esp_peer_msg_t msg = {
@@ -908,6 +1055,8 @@ static void handle_signaling_payload(const char *payload, int len)
     } else if (type && strcmp(type, "candidate") == 0) {
         const char *candidate = json_string(message, "candidate");
         forward_to_peer(type, candidate, candidate ? strlen(candidate) + 1 : 0);
+    } else if (type && strcmp(type, "reoffer-request") == 0) {
+        handle_reoffer_request();
     }
 
     cJSON_Delete(root);
@@ -919,6 +1068,7 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
     switch (event_id) {
     case WEBSOCKET_EVENT_CONNECTED:
         ESP_LOGI(TAG, "websocket open");
+        start_local_offer();
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "websocket close");
@@ -975,6 +1125,7 @@ static esp_err_t join_room(void)
     strlcpy(app.client_id, client_id, sizeof(app.client_id));
     strlcpy(app.wss_url, wss_url, sizeof(app.wss_url));
     app.is_initiator = json_bool_string(params, "is_initiator");
+    parse_first_ice_server(params);
     ESP_LOGI(TAG, "join room=%s client_id=%s initiator=%d wss_url=%s",
              app.room, app.client_id, app.is_initiator, app.wss_url);
     cJSON_Delete(root);
