@@ -22,7 +22,7 @@ static const char *TAG = "speaker-tone";
 #define CORE_S3_SPEAKER_BCLK_GPIO 34
 #define CORE_S3_SPEAKER_WS_GPIO 33
 #define CORE_S3_SPEAKER_DOUT_GPIO 13
-#define SPEAKER_SAMPLE_RATE 44100
+#define SPEAKER_SAMPLE_RATE 24000
 #define SPEAKER_TONE_HZ 440
 #define SPEAKER_FRAMES_PER_WRITE 480
 
@@ -90,6 +90,27 @@ static size_t i2c_probe_known_devices(void)
     return found;
 }
 
+static bool i2c_candidate_can_read_axp(void)
+{
+    i2c_master_dev_handle_t power = NULL;
+    uint8_t axp90 = 0;
+    esp_err_t ret = add_i2c_device(CORE_S3_AXP2101_I2C_ADDR, &power);
+    if (ret == ESP_OK) {
+        ret = read_reg8(power, 0x90, &axp90);
+    }
+    if (power) {
+        i2c_master_bus_rm_device(power);
+    }
+    ESP_LOGI(TAG,
+             "i2c axp-read-test port=%d sda=%d scl=%d reg90=0x%02x ret=%s",
+             active_i2c_port,
+             active_sda_gpio,
+             active_scl_gpio,
+             axp90,
+             esp_err_to_name(ret));
+    return ret == ESP_OK;
+}
+
 static esp_err_t init_i2c_pair(i2c_port_num_t port, int sda_gpio, int scl_gpio)
 {
     if (i2c_bus) {
@@ -114,17 +135,16 @@ static esp_err_t init_i2c_pair(i2c_port_num_t port, int sda_gpio, int scl_gpio)
 
 static esp_err_t init_i2c(void)
 {
-    // M5Unified opens the CoreS3 internal I2C bus on I2C_NUM_1 with SCL=11/SDA=12
-    // when an external I2C bus can use I2C_NUM_0. Try that first, then fall back
-    // to port/pin variants only for boundary evidence.
+    // Moddable m5stack_cores3 provider.js uses the internal I2C bus as port 0,
+    // SDA=12, SCL=11. M5Unified variants are kept only as diagnostics.
     const struct {
         i2c_port_num_t port;
         int sda;
         int scl;
         const char *label;
     } candidates[] = {
+        { I2C_NUM_0, CORE_S3_I2C_SDA_GPIO, CORE_S3_I2C_SCL_GPIO, "moddable-internal" },
         { I2C_NUM_1, CORE_S3_I2C_SDA_GPIO, CORE_S3_I2C_SCL_GPIO, "m5unified-internal" },
-        { I2C_NUM_0, CORE_S3_I2C_SDA_GPIO, CORE_S3_I2C_SCL_GPIO, "port0-same-pins" },
         { I2C_NUM_1, CORE_S3_I2C_SCL_GPIO, CORE_S3_I2C_SDA_GPIO, "port1-reversed-pins" },
         { I2C_NUM_0, CORE_S3_I2C_SCL_GPIO, CORE_S3_I2C_SDA_GPIO, "port0-reversed-pins" },
     };
@@ -137,13 +157,15 @@ static esp_err_t init_i2c(void)
             continue;
         }
         vTaskDelay(pdMS_TO_TICKS(200));
-        if (i2c_probe_known_devices() > 0) {
+        size_t probes = i2c_probe_known_devices();
+        if (probes > 0 || i2c_candidate_can_read_axp()) {
             ESP_LOGI(TAG, "selected I2C candidate %s", candidates[i].label);
             return ESP_OK;
         }
     }
-    ESP_LOGW(TAG, "no devices found on any CoreS3 internal I2C candidate; continuing to I2S boundary");
-    return last_ret == ESP_OK ? ESP_OK : last_ret;
+    ESP_LOGW(TAG,
+             "no devices found on any CoreS3 internal I2C candidate; reverting to Moddable internal bus for power/amp writes");
+    return init_i2c_pair(I2C_NUM_0, CORE_S3_I2C_SDA_GPIO, CORE_S3_I2C_SCL_GPIO);
 }
 
 static esp_err_t core_s3_aw9523_bit_on(uint8_t reg, uint8_t mask)
@@ -196,44 +218,59 @@ static uint16_t aw88298_rate_reg_value(uint32_t sample_rate)
     return (uint16_t)(reg_value | 0x14c0);
 }
 
-static esp_err_t enable_speaker_amp(void)
+static esp_err_t init_aw9523_like_moddable(void)
 {
     i2c_master_dev_handle_t expander = NULL;
+    esp_err_t ret = add_i2c_device(CORE_S3_AW9523_I2C_ADDR, &expander);
+    if (ret == ESP_OK) ret = write_reg8(expander, 0x02, 0b00000111);
+    if (ret == ESP_OK) ret = write_reg8(expander, 0x03, 0b10000011);
+    if (ret == ESP_OK) ret = write_reg8(expander, 0x04, 0b00011000);
+    if (ret == ESP_OK) ret = write_reg8(expander, 0x05, 0b00001100);
+    if (ret == ESP_OK) ret = write_reg8(expander, 0x11, 0b00010000);
+    if (ret == ESP_OK) ret = write_reg8(expander, 0x12, 0b11111111);
+    if (ret == ESP_OK) ret = write_reg8(expander, 0x13, 0b11111111);
+
+    // Match Moddable resetLcd(): clear P0_5 briefly, then set it again.
+    uint8_t reg03 = 0;
+    if (ret == ESP_OK) ret = read_reg8(expander, 0x03, &reg03);
+    if (ret == ESP_OK) ret = write_reg8(expander, 0x03, reg03 & 0b11011111);
+    if (ret == ESP_OK) vTaskDelay(pdMS_TO_TICKS(20));
+    if (ret == ESP_OK) ret = write_reg8(expander, 0x03, (reg03 & 0b11011111) | 0b00100000);
+
+    ESP_LOGI(TAG, "aw9523 Moddable setup ret=%s reg03_before=0x%02x", esp_err_to_name(ret), reg03);
+    if (expander) i2c_master_bus_rm_device(expander);
+    return ret;
+}
+
+static esp_err_t enable_speaker_amp(void)
+{
     i2c_master_dev_handle_t amp = NULL;
-    esp_err_t expander_ret = add_i2c_device(CORE_S3_AW9523_I2C_ADDR, &expander);
     esp_err_t amp_ret = add_i2c_device(CORE_S3_AW88298_I2C_ADDR, &amp);
 
-    uint8_t reg02 = 0;
-    if (expander_ret == ESP_OK) expander_ret = read_reg8(expander, 0x02, &reg02);
-    if (expander_ret == ESP_OK) expander_ret = write_reg8(expander, 0x02, reg02 | 0x04);
-
     uint16_t rate_reg = aw88298_rate_reg_value(SPEAKER_SAMPLE_RATE);
-    // M5Unified CoreS3 speaker callback sequence for AW88298.
+    // Match Moddable m5stack_cores3/setup-target.js AW88298 constructor.
+    if (amp_ret == ESP_OK) amp_ret = write_reg16_be(amp, 0x05, 0x0008); // RMSE=0 HAGCE=0 HDCCE=0 HMUTE=0
     if (amp_ret == ESP_OK) amp_ret = write_reg16_be(amp, 0x61, 0x0673); // boost mode disabled
     if (amp_ret == ESP_OK) amp_ret = write_reg16_be(amp, 0x04, 0x4040); // I2SEN=1 AMPPD=0 PWDN=0
-    if (amp_ret == ESP_OK) amp_ret = write_reg16_be(amp, 0x05, 0x0008); // unmute
-    if (amp_ret == ESP_OK) amp_ret = write_reg16_be(amp, 0x06, rate_reg); // sample-rate table + BCK mode 16*2
-    if (amp_ret == ESP_OK) amp_ret = write_reg16_be(amp, 0x0c, 0x0064); // full volume
+    if (amp_ret == ESP_OK) amp_ret = write_reg16_be(amp, 0x0c, 0x0664); // volume=250 like Moddable
+    if (amp_ret == ESP_OK) amp_ret = write_reg16_be(amp, 0x06, rate_reg); // sample-rate table
 
     ESP_LOGI(TAG,
-             "amp enable expander_ret=%s aw9523_reg02_before=0x%02x aw88298_ret=%s rate_reg=0x%04x sample_rate=%d",
-             esp_err_to_name(expander_ret),
-             reg02,
+             "amp enable aw88298_ret=%s rate_reg=0x%04x sample_rate=%d",
              esp_err_to_name(amp_ret),
              rate_reg,
              SPEAKER_SAMPLE_RATE);
     if (amp_ret != ESP_OK) {
-        ESP_LOGW(TAG, "AW88298 writes did not ACK; continuing after AXP2101/AW9523 like M5Unified-style bring-up");
+        ESP_LOGW(TAG, "AW88298 writes did not ACK; speaker will likely remain silent");
     }
 
-    if (expander) i2c_master_bus_rm_device(expander);
     if (amp) i2c_master_bus_rm_device(amp);
-    return expander_ret;
+    return amp_ret;
 }
 
 static esp_err_t start_i2s(void)
 {
-    i2s_chan_config_t chan_config = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    i2s_chan_config_t chan_config = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
     chan_config.dma_desc_num = 8;
     chan_config.dma_frame_num = 240;
     chan_config.auto_clear = true;
@@ -244,17 +281,17 @@ static esp_err_t start_i2s(void)
     }
 
     i2s_std_config_t std_config = {0};
-    std_config.clk_cfg.clk_src = I2S_CLK_SRC_PLL_160M;
+    std_config.clk_cfg.clk_src = I2S_CLK_SRC_DEFAULT;
     std_config.clk_cfg.sample_rate_hz = SPEAKER_SAMPLE_RATE;
-    std_config.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_128;
+    std_config.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
     std_config.slot_cfg.data_bit_width = I2S_DATA_BIT_WIDTH_16BIT;
-    std_config.slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_16BIT;
+    std_config.slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_AUTO;
     std_config.slot_cfg.slot_mode = I2S_SLOT_MODE_MONO;
-    std_config.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
-    std_config.slot_cfg.ws_width = 16;
+    std_config.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+    std_config.slot_cfg.ws_width = I2S_DATA_BIT_WIDTH_16BIT;
     std_config.slot_cfg.ws_pol = false;
     std_config.slot_cfg.bit_shift = true;
-    std_config.slot_cfg.left_align = true;
+    std_config.slot_cfg.left_align = false;
     std_config.slot_cfg.big_endian = false;
     std_config.slot_cfg.bit_order_lsb = false;
     std_config.gpio_cfg.mclk = I2S_GPIO_UNUSED;
@@ -319,10 +356,10 @@ void app_main(void)
     ESP_LOGI(TAG, "CoreS3 speaker-only tone sample start");
     ESP_ERROR_CHECK(init_i2c());
     vTaskDelay(pdMS_TO_TICKS(500));
-    esp_err_t boost_ret = core_s3_aw9523_bit_on(0x03, 0x80); // M5Unified: SY7088 BOOST_EN
-    ESP_LOGI(TAG, "boost enable boundary ret=%s", esp_err_to_name(boost_ret));
     esp_err_t power_ret = init_power_rails();
     ESP_LOGI(TAG, "power init boundary ret=%s", esp_err_to_name(power_ret));
+    esp_err_t aw9523_ret = init_aw9523_like_moddable();
+    ESP_LOGI(TAG, "aw9523 init boundary ret=%s", esp_err_to_name(aw9523_ret));
     i2c_probe_known_devices();
     esp_err_t amp_ret = enable_speaker_amp();
     ESP_LOGI(TAG, "amp init boundary ret=%s", esp_err_to_name(amp_ret));

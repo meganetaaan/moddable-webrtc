@@ -35,7 +35,7 @@ describe('ESP-IDF CoreS3 speaker sink', () => {
     assert.match(source, /core_s3_i2c_write_reg8\(power,\s*0x90,\s*0xbf\)/);
     assert.match(source, /core_s3_speaker_enable_amp\(true\)/);
     assert.match(source, /core_s3_aw88298_write_reg\([^,]+,\s*0x04,\s*0x4040\)/);
-    assert.match(source, /core_s3_aw88298_write_reg\([^,]+,\s*0x0c,\s*0x0064\)/i);
+    assert.match(source, /core_s3_aw88298_write_reg\([^,]+,\s*0x0c,\s*0x0664\)/i);
     assert.match(source, /core-s3 speaker aw88298 register writes did not ACK/);
     assert.match(source, /core-s3 speaker amp enable=%d/);
   });
