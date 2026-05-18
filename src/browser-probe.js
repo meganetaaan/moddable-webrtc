@@ -195,6 +195,20 @@ export function summarizeSelectedCandidatePair(stats) {
   return `ice selected-pair state=${selectedPair.state ?? 'unknown'} nominated=${selectedPair.nominated ?? false} local=${local?.candidateType ?? 'unknown'}/${local?.protocol ?? 'unknown'}/${local?.address ?? local?.ip ?? 'unknown'}:${local?.port ?? 'unknown'} remote=${remote?.candidateType ?? 'unknown'}/${remote?.protocol ?? 'unknown'}/${remote?.address ?? remote?.ip ?? 'unknown'}:${remote?.port ?? 'unknown'} bytesSent=${selectedPair.bytesSent ?? 0} bytesReceived=${selectedPair.bytesReceived ?? 0}`;
 }
 
+export async function ensureAudioDuplexSender(peer, stream) {
+  const track = stream?.getAudioTracks?.()[0];
+  if (!track) return false;
+  const transceivers = peer.getTransceivers?.() ?? [];
+  const transceiver = transceivers.find((candidate) => candidate?.receiver?.track?.kind === 'audio')
+    ?? transceivers.find((candidate) => candidate?.sender?.track?.kind === 'audio');
+  if (!transceiver?.sender) return false;
+  transceiver.direction = 'sendrecv';
+  if (typeof transceiver.sender.replaceTrack === 'function') {
+    await transceiver.sender.replaceTrack(track);
+  }
+  return true;
+}
+
 function attachRemoteTrack(track, streams) {
   appendLog(`ontrack kind=${track.kind} id=${track.id} state=${track.readyState} muted=${track.muted}`);
   track.onunmute = () => appendLog(`track unmute kind=${track.kind}`);
@@ -240,7 +254,12 @@ async function configureMedia(peer, config) {
       const tracks = stream.getAudioTracks();
       appendLog(`browser mic acquired tracks=${tracks.length}`);
       if (tracks[0]) {
-        peer.addTransceiver(tracks[0], { streams: [stream], direction: 'sendrecv' });
+        peer.__stackchanAudioDuplexStream = stream;
+        if (config.role === 'answerer') {
+          appendLog('browser mic deferred until remote audio transceiver is available');
+        } else {
+          peer.addTransceiver(tracks[0], { streams: [stream], direction: 'sendrecv' });
+        }
       } else {
         peer.addTransceiver('audio', { direction: 'recvonly' });
         appendLog('browser mic acquired no audio track; falling back to recvonly');
@@ -347,6 +366,10 @@ async function handleRemoteMessage(peer, payload, sendMessage) {
   if (message.type === 'offer') {
     appendLog(`remote offer media ${summarizeSdpMedia(message.sdp)}`);
     await peer.setRemoteDescription({ type: 'offer', sdp: message.sdp });
+    if (peer.__stackchanAudioDuplexStream) {
+      const attached = await ensureAudioDuplexSender(peer, peer.__stackchanAudioDuplexStream);
+      appendLog(`browser mic attached to remote audio transceiver=${attached}`);
+    }
     const answer = await peer.createAnswer();
     await peer.setLocalDescription(answer);
     sendMessage(buildAnswerMessage(answer));

@@ -19,6 +19,7 @@ import {
 
   summarizeSdpMedia,
   summarizeSelectedCandidatePair,
+  ensureAudioDuplexSender,
 } from './browser-probe.js';
 
 describe('browser probe helpers', () => {
@@ -54,6 +55,27 @@ describe('browser probe helpers', () => {
 
   it('parses media=audio-duplex as bidirectional audio', () => {
     assert.equal(parseProbeConfig('?media=audio-duplex', 'http://127.0.0.1:18090').media, 'audio-duplex');
+  });
+
+  it('attaches a browser mic track to the remote audio transceiver before creating an answer', async () => {
+    const calls = [];
+    const track = { kind: 'audio', id: 'mic-1' };
+    const stream = { getAudioTracks: () => [track] };
+    const transceiver = {
+      receiver: { track: { kind: 'audio' } },
+      sender: {
+        track: null,
+        replaceTrack: async (nextTrack) => calls.push(['replaceTrack', nextTrack]),
+      },
+      direction: 'recvonly',
+    };
+    const peer = { getTransceivers: () => [transceiver] };
+
+    const result = await ensureAudioDuplexSender(peer, stream);
+
+    assert.equal(result, true);
+    assert.deepEqual(calls, [['replaceTrack', track]]);
+    assert.equal(transceiver.direction, 'sendrecv');
   });
 
   it('builds raw-candidate AppRTC messages instead of serializing the full RTCIceCandidate object', () => {
