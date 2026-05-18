@@ -1,0 +1,25 @@
+{
+  "include": [
+    "$(MODDABLE)/examples/manifest_base.json",
+    "$(MODDABLE)/modules/io/manifest.json"
+  ],
+  "modules": {
+    "*": [
+      "./main"
+    ],
+    "pins/*": [
+      "$(MODULES)/pins/i2s/*"
+    ]
+  },
+  "defines": {
+    "audioOut": {
+      "queueLength": 24,
+      "bitsPerSample": 16,
+      "numChannels": 1,
+      "sampleRate": 24000
+    }
+  },
+  "config": {
+    "startupSound": false
+  }
+}
