@@ -6,6 +6,8 @@ Current goal: prove M5Stack CoreS3 ↔ PC WebRTC DataChannel ping/pong plus one 
 
 This repository keeps reusable signaling, browser, and firmware spike assets out of `/tmp` so WebRTC boundaries can be reproduced across WSL restarts.
 
+When a run gets stuck, use `AGENTS.md` for the short operational rules and `docs/guide/webrtc-stuck-debugging.md` for the detailed boundary checklist.
+
 ## Development AppRTC signaling server
 
 The first reusable component is a small AppRTC-compatible signaling server for LAN debugging.
@@ -107,6 +109,6 @@ This keeps the next boundary narrow:
 
 The native-only issue #8/#9 scaffold lives in `firmware/esp-idf-datachannel/`.
 
-It joins the same AppRTC signaling server, opens the advertised `/ws`, forwards browser-offerer `offer` and raw `candidate` messages into `esp_peer`, logs `esp_peer_open` / `esp_peer_send_msg` return codes and heap boundaries, replies to DataChannel ping with a tiny pong if SCTP opens, and can negotiate a send-only generated PCMA audio test source for browser `ontrack`/RTP counter evidence.
+It joins the same AppRTC signaling server, opens the advertised `/ws`, forwards browser-offerer `offer` and raw `candidate` messages into `esp_peer`, logs `esp_peer_open` / `esp_peer_send_msg` return codes and heap boundaries, replies to DataChannel ping with a tiny pong if SCTP opens, and can negotiate a send-only generated PCMA 440 Hz tone test source or guarded CoreS3 ES7210 mic source for browser `ontrack`/RTP counter evidence.
 
-Audio was chosen before video because `esp_peer` directly supports G.711 A-law audio frames and browsers can receive PCMA without CoreS3 camera/H.264 plumbing. See `firmware/esp-idf-datachannel/README.md` for menuconfig fields, hardware run steps, resource metrics, fallback plan, and the boundary table for the next CoreS3 run.
+Audio was chosen before video because `esp_peer` directly supports G.711 A-law audio frames and browsers can receive PCMA without CoreS3 camera/H.264 plumbing. The mic source is currently a narrow raw I2S bridge aligned to Espressif's `esp_capture` contract where possible; the intended robust follow-up is adopting `esp_capture` and passing acquired frame `pts/data/size` directly into `esp_peer_send_audio()`. See `firmware/esp-idf-datachannel/README.md` for menuconfig fields, hardware run steps, resource metrics, fallback plan, and the boundary table for the next CoreS3 run.

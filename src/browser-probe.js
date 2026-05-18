@@ -2,7 +2,8 @@ export function parseProbeConfig(search = globalThis.location?.search ?? '', ori
   const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
   const role = params.get('role') === 'answerer' ? 'answerer' : 'offerer';
   const iceTransportPolicy = params.get('icePolicy') === 'relay' ? 'relay' : 'all';
-  const media = ['audio', 'video'].includes(params.get('media')) ? params.get('media') : 'none';
+  const requestedMedia = params.get('media') === 'mic' ? 'audio' : params.get('media');
+  const media = ['audio', 'video'].includes(requestedMedia) ? requestedMedia : 'none';
 
   return {
     signalBaseUrl: params.get('signal') || origin,
@@ -89,6 +90,47 @@ function setStatus(status) {
   if (target) target.textContent = status;
 }
 
+export function formatMediaElementState(kind, label, media) {
+  return `${kind} element ${label} paused=${media.paused} muted=${media.muted} volume=${media.volume} readyState=${media.readyState} currentTime=${media.currentTime.toFixed(3)}`;
+}
+
+export function summarizeInboundRtpReport(report) {
+  const evidence = report.kind === 'audio'
+    ? (report.totalSamplesReceived ?? report.packetsReceived ?? 0)
+    : (report.framesDecoded ?? report.packetsReceived ?? 0);
+  return `stats ${report.kind} packets=${report.packetsReceived ?? 0} bytes=${report.bytesReceived ?? 0} evidence=${evidence}`;
+}
+
+export function summarizeIceCandidate(candidate = '') {
+  const parts = candidate.trim().split(/\s+/);
+  const typIndex = parts.indexOf('typ');
+  const type = typIndex >= 0 ? parts[typIndex + 1] : 'unknown';
+  const protocol = parts[2] ?? 'unknown';
+  const address = parts[4] ?? 'unknown';
+  const port = parts[5] ?? 'unknown';
+  const mdns = address.endsWith('.local');
+  return `candidate type=${type} protocol=${protocol} address=${address}${mdns ? ' mdns=true' : ''} port=${port}`;
+}
+
+export function summarizeSelectedCandidatePair(stats) {
+  let selectedPair;
+  const reports = Array.from(stats.values());
+  for (const report of reports) {
+    if (report.type === 'transport' && report.selectedCandidatePairId) {
+      selectedPair = stats.get(report.selectedCandidatePairId);
+      break;
+    }
+    if (report.type === 'candidate-pair' && report.selected) {
+      selectedPair = report;
+      break;
+    }
+  }
+  if (!selectedPair) return 'ice selected-pair none';
+  const local = stats.get(selectedPair.localCandidateId);
+  const remote = stats.get(selectedPair.remoteCandidateId);
+  return `ice selected-pair state=${selectedPair.state ?? 'unknown'} nominated=${selectedPair.nominated ?? false} local=${local?.candidateType ?? 'unknown'}/${local?.protocol ?? 'unknown'}/${local?.address ?? local?.ip ?? 'unknown'}:${local?.port ?? 'unknown'} remote=${remote?.candidateType ?? 'unknown'}/${remote?.protocol ?? 'unknown'}/${remote?.address ?? remote?.ip ?? 'unknown'}:${remote?.port ?? 'unknown'} bytesSent=${selectedPair.bytesSent ?? 0} bytesReceived=${selectedPair.bytesReceived ?? 0}`;
+}
+
 function attachRemoteTrack(track, streams) {
   appendLog(`ontrack kind=${track.kind} id=${track.id} state=${track.readyState} muted=${track.muted}`);
   track.onunmute = () => appendLog(`track unmute kind=${track.kind}`);
@@ -96,9 +138,20 @@ function attachRemoteTrack(track, streams) {
   track.onended = () => appendLog(`track ended kind=${track.kind}`);
 
   const media = track.kind === 'video' ? document.querySelector('#remoteVideo') : document.querySelector('#remoteAudio');
-  if (media && streams[0]) {
-    media.srcObject = streams[0];
-    media.play?.().catch((error) => appendLog(`${track.kind} autoplay blocked ${error.message}`));
+  if (media) {
+    media.srcObject = streams[0] ?? new MediaStream([track]);
+    const logMediaState = (label) => appendLog(formatMediaElementState(track.kind, label, media));
+    logMediaState('attached');
+    media.onplay = () => logMediaState('play');
+    media.onpause = () => logMediaState('pause');
+    media.onvolumechange = () => logMediaState('volumechange');
+    media.ontimeupdate = () => logMediaState('timeupdate');
+    media.play?.()
+      .then(() => logMediaState('play-resolved'))
+      .catch((error) => {
+        appendLog(`${track.kind} autoplay blocked ${error.message}`);
+        logMediaState('play-rejected');
+      });
   }
 
   if (track.kind === 'video' && media?.requestVideoFrameCallback) {
@@ -129,10 +182,10 @@ function startStatsLog(peer, config) {
   setInterval(async () => {
     try {
       const stats = await peer.getStats();
+      appendLog(summarizeSelectedCandidatePair(stats));
       for (const report of stats.values()) {
         if (report.type === 'inbound-rtp' && !report.isRemote && report.kind === config.media) {
-          const frames = report.framesDecoded ?? report.totalSamplesReceived ?? report.packetsReceived ?? 0;
-          appendLog(`stats ${report.kind} packets=${report.packetsReceived ?? 0} bytes=${report.bytesReceived ?? 0} evidence=${frames}`);
+          appendLog(summarizeInboundRtpReport(report));
         }
       }
     } catch (error) {
@@ -161,7 +214,7 @@ async function createPeerConnection(config, sendMessage) {
   peer.onicecandidate = (event) => {
     const message = buildCandidateMessage(event);
     if (message) {
-      appendLog(`send candidate ${message.candidate.slice(0, 80)}`);
+      appendLog(`send ${summarizeIceCandidate(message.candidate)}`);
       sendMessage(message);
     }
   };

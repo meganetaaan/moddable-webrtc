@@ -42,7 +42,19 @@ config STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
     bool "Audio: generated PCMA test source"
     help
         Negotiate a send-only audio track and send generated 8 kHz G.711 A-law
-        frames. This proves RTP/media transport before wiring CoreS3 I2S capture.
+        tone frames. This proves RTP/media transport and audible playback before
+        wiring CoreS3 I2S capture.
+
+config STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
+    bool "Audio: CoreS3 ES7210 microphone source"
+    help
+        Negotiate a send-only audio track, capture CoreS3 microphone samples
+        from the ES7210 I2S data output, convert PCM16 to G.711 A-law, and
+        send 8 kHz mono 20 ms-equivalent frames with explicit PTS through
+        esp_peer_send_audio(). This raw bridge is intentionally narrow because
+        esp_capture is not yet part of this component set; replace it with the
+        esp_capture audio_dev_src/sink path when that dependency is adopted.
+        Keep the generated source as the default known-good transport baseline.
 
 config STACKCHAN_MEDIA_VIDEO_PLACEHOLDER
     bool "Video placeholder: documented only"
@@ -66,5 +78,43 @@ config STACKCHAN_AUDIO_TEST_FRAME_BYTES
     depends on STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
     help
         160 bytes is 20 ms of 8 kHz mono G.711 A-law audio.
+
+config STACKCHAN_CORE_S3_MIC_FRAME_SAMPLES
+    int "CoreS3 microphone frame samples"
+    default 160
+    range 80 320
+    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
+    help
+        160 samples is 20 ms at the default 8 kHz sample rate.
+
+config STACKCHAN_CORE_S3_MIC_I2C_SDA_GPIO
+    int "CoreS3 ES7210 I2C SDA GPIO"
+    default 12
+    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
+
+config STACKCHAN_CORE_S3_MIC_I2C_SCL_GPIO
+    int "CoreS3 ES7210 I2C SCL GPIO"
+    default 11
+    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
+
+config STACKCHAN_CORE_S3_MIC_I2S_MCLK_GPIO
+    int "CoreS3 ES7210 I2S MCLK GPIO"
+    default 0
+    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
+
+config STACKCHAN_CORE_S3_MIC_I2S_BCLK_GPIO
+    int "CoreS3 ES7210 I2S BCLK GPIO"
+    default 34
+    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
+
+config STACKCHAN_CORE_S3_MIC_I2S_WS_GPIO
+    int "CoreS3 ES7210 I2S WS GPIO"
+    default 33
+    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
+
+config STACKCHAN_CORE_S3_MIC_I2S_DIN_GPIO
+    int "CoreS3 ES7210 I2S DATO-to-ESP GPIO"
+    default 14
+    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
 
 endmenu

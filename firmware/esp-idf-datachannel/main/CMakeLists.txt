@@ -4,6 +4,8 @@ idf_component_register(
   REQUIRES
     cjson
     esp_http_client
+    esp_driver_i2c
+    esp_driver_i2s
     esp_netif
     esp_wifi
     esp_websocket_client
