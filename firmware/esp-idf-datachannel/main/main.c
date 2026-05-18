@@ -735,9 +735,11 @@ static void audio_mic_task(void *arg)
         esp_err_t read_ret = i2s_channel_read(rx, pcm, sizeof(pcm), &bytes_read, pdMS_TO_TICKS(200));
         if (read_ret != ESP_OK) {
             app.mic_read_failures++;
-            ESP_LOGW(TAG, "core-s3 mic read failure count=%u ret=%s",
-                     (unsigned)app.mic_read_failures,
-                     esp_err_to_name(read_ret));
+            if (app.mic_read_failures == 1 || app.mic_read_failures % 50 == 0) {
+                ESP_LOGW(TAG, "core-s3 mic read failure count=%u ret=%s",
+                         (unsigned)app.mic_read_failures,
+                         esp_err_to_name(read_ret));
+            }
             continue;
         }
         if (bytes_read < sizeof(pcm)) {
@@ -763,7 +765,7 @@ static void audio_mic_task(void *arg)
                 app.mic_conversion_clips++;
             }
             sum_squares += (uint64_t)abs_sample * (uint64_t)abs_sample;
-            pcma[i] = pcm16_to_alaw(sample);
+            pcma[i] = linear16_to_alaw(sample);
         }
         app.mic_samples += frames_read;
 
@@ -859,7 +861,7 @@ static void close_peer_for_reoffer(void)
     }
 
     ESP_LOGI(TAG, "closing stale peer before reoffer");
-#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
+#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
     app.audio_task_running = false;
 #endif
     app.peer_loop_running = false;
