@@ -10,6 +10,7 @@ import {
   normalizeRemoteCandidate,
   parseProbeConfig,
 
+  explainCandidateConnectivity,
   summarizeCandidate,
   summarizeIceCandidate,
   summarizeIceServers,
@@ -169,6 +170,21 @@ describe('browser probe helpers', () => {
     assert.equal(
       summarizeIceCandidate('candidate:2140150961 1 udp 1677729535 153.169.14.35 47597 typ srflx raddr 0.0.0.0 rport 0'),
       'candidate type=srflx protocol=udp address=153.169.14.35 port=47597',
+    );
+  });
+
+  it('explains browser candidates that ESP peers usually cannot use directly', () => {
+    assert.equal(
+      explainCandidateConnectivity('candidate:2365990239 1 udp 2113937151 e864669a-b16f-4dd3-9f0c-8eb2c2ea7009.local 52455 typ host'),
+      'candidate warning: host candidate uses mDNS .local address; CoreS3/esp_peer usually cannot resolve it, so use a LAN browser with mDNS disabled or TURN relay',
+    );
+    assert.equal(
+      explainCandidateConnectivity('candidate:2140150961 1 udp 1677729535 153.169.14.35 47597 typ srflx raddr 0.0.0.0 rport 0'),
+      'candidate warning: srflx candidate is public/NAT-reflexive; a same-LAN CoreS3 may not be able to send back to it without TURN or a usable host candidate',
+    );
+    assert.equal(
+      explainCandidateConnectivity('candidate:842163049 1 udp 1677729535 203.0.113.10 59902 typ relay raddr 0.0.0.0 rport 0'),
+      null,
     );
   });
 

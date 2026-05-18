@@ -155,6 +155,20 @@ export function summarizeIceCandidate(candidate = '') {
   return `candidate type=${type} protocol=${protocol} address=${address}${mdns ? ' mdns=true' : ''} port=${port}`;
 }
 
+export function explainCandidateConnectivity(candidate = '') {
+  const parts = candidate.trim().split(/\s+/);
+  const typIndex = parts.indexOf('typ');
+  const type = typIndex >= 0 ? parts[typIndex + 1] : 'unknown';
+  const address = parts[4] ?? '';
+  if (type === 'host' && address.endsWith('.local')) {
+    return 'candidate warning: host candidate uses mDNS .local address; CoreS3/esp_peer usually cannot resolve it, so use a LAN browser with mDNS disabled or TURN relay';
+  }
+  if (type === 'srflx') {
+    return 'candidate warning: srflx candidate is public/NAT-reflexive; a same-LAN CoreS3 may not be able to send back to it without TURN or a usable host candidate';
+  }
+  return null;
+}
+
 export function summarizeSelectedCandidatePair(stats) {
   let selectedPair;
   const reports = Array.from(stats.values());
@@ -275,6 +289,8 @@ async function createPeerConnection(config, sendMessage) {
     if (message) {
 
       appendLog(`send ${summarizeIceCandidate(message.candidate)} ${JSON.stringify(summarizeCandidate(message.candidate))}`);
+      const connectivityWarning = explainCandidateConnectivity(message.candidate);
+      if (connectivityWarning) appendLog(connectivityWarning);
 
       sendMessage(message);
     } else {
