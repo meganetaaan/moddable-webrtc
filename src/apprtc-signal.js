@@ -74,6 +74,7 @@ async function textFile(response, contentType, path) {
   response.writeHead(200, {
     'content-type': `${contentType}; charset=utf-8`,
     'content-length': Buffer.byteLength(payload),
+    'cache-control': 'no-store',
   });
   response.end(payload);
 }

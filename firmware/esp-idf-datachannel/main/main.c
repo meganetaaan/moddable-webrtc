@@ -6,6 +6,9 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "driver/i2c_master.h"
+#include "driver/i2s_std.h"
+#include "driver/i2s_tdm.h"
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_event.h"
@@ -15,7 +18,6 @@
 #include "esp_netif.h"
 #include "esp_peer.h"
 #include "esp_peer_default.h"
-#include "esp_timer.h"
 #include "esp_websocket_client.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -27,9 +29,20 @@
 #define WIFI_FAIL_BIT BIT1
 #define HTTP_BUF_SIZE 8192
 #define URL_BUF_SIZE 512
-#define AUDIO_TEST_SAMPLE_RATE_HZ 8000
-#define AUDIO_TEST_TONE_HZ 440
-#define AUDIO_TEST_TONE_AMPLITUDE 12000
+
+#define CORE_S3_ES7210_I2C_ADDR 0x40
+#define CORE_S3_AW88298_I2C_ADDR 0x36
+#define CORE_S3_AW9523_I2C_ADDR 0x58
+#define CORE_S3_AXP2101_I2C_ADDR 0x34
+#define CORE_S3_MIC_SAMPLE_RATE 8000
+#define CORE_S3_MIC_TDM_CHANNELS 4
+#define CORE_S3_SPEAKER_SAMPLE_RATE 8000
+#define CORE_S3_SPEAKER_CHANNELS 2
+#define CORE_S3_SPEAKER_MAX_FRAME_SAMPLES 320
+#define CORE_S3_MIC_FRAME_DURATION_MS ((CONFIG_STACKCHAN_CORE_S3_MIC_FRAME_SAMPLES * 1000U) / CORE_S3_MIC_SAMPLE_RATE)
+#define AUDIO_TEST_TONE_HZ 440U
+#define AUDIO_TEST_TONE_AMPLITUDE 10000
+
 
 static const char *TAG = "stackchan_dc";
 static EventGroupHandle_t wifi_events;
@@ -53,11 +66,42 @@ typedef struct {
     bool peer_connected;
     bool local_offer_started;
     bool audio_task_running;
+    bool speaker_amp_enabled;
+    i2s_chan_handle_t speaker_tx;
     uint32_t audio_tx_frames;
     uint32_t audio_tx_bytes;
     uint32_t audio_tx_drops;
+    uint32_t audio_tx_last_pts;
+    uint32_t audio_tx_last_pts_delta;
+    uint32_t audio_tx_last_size;
+    uint32_t audio_tx_min_size;
+    uint32_t audio_tx_max_size;
+    uint32_t audio_tx_ret_ok;
+    uint32_t audio_tx_ret_fail;
+    uint32_t mic_samples;
+    uint32_t mic_acquire_frames;
+    uint32_t mic_read_failures;
+    uint32_t mic_short_reads;
+    uint32_t mic_conversion_clips;
     uint32_t audio_rx_frames;
     uint32_t audio_rx_bytes;
+    uint32_t audio_rx_empty_frames;
+    uint32_t audio_rx_last_pts;
+    uint32_t audio_rx_last_pts_delta;
+    uint32_t audio_rx_last_size;
+    uint32_t audio_rx_pts_discontinuities;
+    uint32_t audio_rx_decode_samples;
+    uint32_t audio_rx_decode_invalid;
+    uint32_t audio_rx_decode_peak;
+    int16_t audio_rx_decode_min;
+    int16_t audio_rx_decode_max;
+    uint32_t audio_rx_decode_rms;
+    uint32_t audio_rx_speaker_write_frames;
+    uint32_t audio_rx_speaker_write_samples;
+    uint32_t audio_rx_speaker_write_bytes;
+    uint32_t audio_rx_speaker_drops;
+    uint32_t audio_rx_speaker_short_writes;
+    esp_err_t audio_rx_speaker_last_ret;
     uint32_t data_rx_frames;
     uint16_t data_stream_id;
 } app_ctx_t;
@@ -283,16 +327,449 @@ static int peer_audio_info_callback(esp_peer_audio_stream_info_t *info, void *ct
     return 0;
 }
 
+static uint32_t isqrt_u64(uint64_t value)
+{
+    uint64_t bit = 1ULL << 62;
+    while (bit > value) {
+        bit >>= 2;
+    }
+    uint32_t result = 0;
+    while (bit) {
+        if (value >= result + bit) {
+            value -= result + bit;
+            result = (result >> 1) + bit;
+        } else {
+            result >>= 1;
+        }
+        bit >>= 2;
+    }
+    return result;
+}
+
+static int16_t alaw_to_linear16(uint8_t sample)
+{
+    sample ^= 0x55;
+    int16_t value = (sample & 0x0f) << 4;
+    uint8_t segment = (sample & 0x70) >> 4;
+
+    switch (segment) {
+    case 0:
+        value += 8;
+        break;
+    case 1:
+        value += 0x108;
+        break;
+    default:
+        value += 0x108;
+        value <<= segment - 1;
+        break;
+    }
+    return (sample & 0x80) ? value : -value;
+}
+
+#if CONFIG_STACKCHAN_MEDIA_CORE_S3_SPEAKER_SINK || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
+static esp_err_t core_s3_i2c_write_reg8(i2c_master_dev_handle_t device, uint8_t reg, uint8_t value)
+{
+    uint8_t data[2] = { reg, value };
+    return i2c_master_transmit(device, data, sizeof(data), pdMS_TO_TICKS(100));
+}
+
+static esp_err_t core_s3_i2c_read_reg8(i2c_master_dev_handle_t device, uint8_t reg, uint8_t *value)
+{
+    if (!value) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return i2c_master_transmit_receive(device, &reg, sizeof(reg), value, sizeof(*value), pdMS_TO_TICKS(100));
+}
+
+static esp_err_t core_s3_aw88298_write_reg(i2c_master_dev_handle_t amp, uint8_t reg, uint16_t value)
+{
+    uint8_t data[3] = { reg, (uint8_t)(value >> 8), (uint8_t)(value & 0xff) };
+    return i2c_master_transmit(amp, data, sizeof(data), pdMS_TO_TICKS(100));
+}
+
+static esp_err_t core_s3_speaker_enable_amp(bool enable)
+{
+    if (app.speaker_amp_enabled == enable) {
+        return ESP_OK;
+    }
+
+    i2c_master_bus_handle_t bus = NULL;
+    i2c_master_dev_handle_t amp = NULL;
+    i2c_master_dev_handle_t expander = NULL;
+    i2c_master_dev_handle_t power = NULL;
+    i2c_master_bus_config_t bus_config = {
+        .i2c_port = I2C_NUM_0,
+        .sda_io_num = CONFIG_STACKCHAN_CORE_S3_MIC_I2C_SDA_GPIO,
+        .scl_io_num = CONFIG_STACKCHAN_CORE_S3_MIC_I2C_SCL_GPIO,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+
+    esp_err_t ret = i2c_new_master_bus(&bus_config, &bus);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "core-s3 speaker amp i2c bus ret=%s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    i2c_device_config_t amp_config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = CORE_S3_AW88298_I2C_ADDR,
+        .scl_speed_hz = 400000,
+    };
+    i2c_device_config_t expander_config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = CORE_S3_AW9523_I2C_ADDR,
+        .scl_speed_hz = 400000,
+    };
+    i2c_device_config_t power_config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = CORE_S3_AXP2101_I2C_ADDR,
+        .scl_speed_hz = 400000,
+    };
+
+    ret = i2c_master_bus_add_device(bus, &amp_config, &amp);
+    if (ret == ESP_OK) {
+        ret = i2c_master_bus_add_device(bus, &expander_config, &expander);
+    }
+    if (ret == ESP_OK) {
+        ret = i2c_master_bus_add_device(bus, &power_config, &power);
+    }
+
+    esp_err_t power_ret = ESP_OK;
+    esp_err_t expander_ret = ESP_ERR_INVALID_STATE;
+    esp_err_t amp_ret = ESP_ERR_INVALID_STATE;
+    uint8_t reg02 = 0;
+    if (ret == ESP_OK) {
+        if (enable) {
+            uint8_t axp90 = 0;
+            power_ret = core_s3_i2c_read_reg8(power, 0x90, &axp90);
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_write_reg8(power, 0x90, axp90 | 0xb4);
+            }
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_write_reg8(power, 0x97, 0x1c);
+            }
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_write_reg8(power, 0x69, 0x35);
+            }
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_write_reg8(power, 0x30, 0x3f);
+            }
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_write_reg8(power, 0x90, 0xbf);
+            }
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_write_reg8(power, 0x94, 0x1c);
+            }
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_write_reg8(power, 0x95, 0x1c);
+            }
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_write_reg8(power, 0x27, 0x00);
+            }
+            uint8_t charge = 0;
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_read_reg8(power, 0x62, &charge);
+            }
+            if (power_ret == ESP_OK) {
+                power_ret = core_s3_i2c_write_reg8(power, 0x62, (charge & 0xe0) | 13);
+            }
+        }
+        expander_ret = core_s3_i2c_read_reg8(expander, 0x02, &reg02);
+        if (expander_ret == ESP_OK) {
+            uint8_t next = enable ? (reg02 | 0x04) : (reg02 & (uint8_t)~0x04);
+            expander_ret = core_s3_i2c_write_reg8(expander, 0x02, next);
+        }
+        if (enable) {
+            if (power_ret == ESP_OK && expander_ret == ESP_OK) {
+                amp_ret = core_s3_aw88298_write_reg(amp, 0x61, 0x0673); // boost mode disabled
+            }
+            if (amp_ret == ESP_OK) {
+                amp_ret = core_s3_aw88298_write_reg(amp, 0x04, 0x4040); // I2SEN=1 AMPPD=0 PWDN=0
+            }
+            if (amp_ret == ESP_OK) {
+                amp_ret = core_s3_aw88298_write_reg(amp, 0x05, 0x0008); // unmute AGC/DC filters
+            }
+            if (amp_ret == ESP_OK) {
+                amp_ret = core_s3_aw88298_write_reg(amp, 0x06, 0x14c3); // M5Unified 8 kHz-ish rate table + I2S BCK mode
+            }
+            if (amp_ret == ESP_OK) {
+                amp_ret = core_s3_aw88298_write_reg(amp, 0x0c, 0x0064); // full volume
+            }
+        } else {
+            amp_ret = core_s3_aw88298_write_reg(amp, 0x04, 0x4000); // I2SEN=0, keep amp/power domains settled
+        }
+    }
+
+    if (expander) {
+        esp_err_t del_ret = i2c_master_bus_rm_device(expander);
+        if (del_ret != ESP_OK) {
+            ESP_LOGW(TAG, "core-s3 speaker aw9523 remove ret=%s", esp_err_to_name(del_ret));
+        }
+    }
+    if (power) {
+        esp_err_t del_ret = i2c_master_bus_rm_device(power);
+        if (del_ret != ESP_OK) {
+            ESP_LOGW(TAG, "core-s3 speaker axp2101 remove ret=%s", esp_err_to_name(del_ret));
+        }
+    }
+    if (amp) {
+        esp_err_t del_ret = i2c_master_bus_rm_device(amp);
+        if (del_ret != ESP_OK) {
+            ESP_LOGW(TAG, "core-s3 speaker aw88298 remove ret=%s", esp_err_to_name(del_ret));
+        }
+    }
+    esp_err_t bus_del_ret = i2c_del_master_bus(bus);
+    if (bus_del_ret != ESP_OK) {
+        ESP_LOGW(TAG, "core-s3 speaker amp i2c bus cleanup ret=%s", esp_err_to_name(bus_del_ret));
+    }
+
+    esp_err_t effective_ret = ret;
+    if (effective_ret == ESP_OK && power_ret != ESP_OK) {
+        effective_ret = power_ret;
+    }
+    if (effective_ret == ESP_OK && expander_ret != ESP_OK) {
+        effective_ret = expander_ret;
+    }
+    if (effective_ret == ESP_OK) {
+        app.speaker_amp_enabled = enable;
+        if (amp_ret != ESP_OK) {
+            ESP_LOGW(TAG, "core-s3 speaker aw88298 register writes did not ACK; continuing like M5Unified after power/expander enable");
+        }
+    }
+    ESP_LOGI(TAG, "core-s3 speaker amp enable=%d ret=%s aw9523=0x%02x power_ret=%s expander_ret=%s aw88298_ret=%s",
+             enable,
+             esp_err_to_name(effective_ret),
+             reg02,
+             esp_err_to_name(power_ret),
+             esp_err_to_name(expander_ret),
+             esp_err_to_name(amp_ret));
+    return effective_ret;
+}
+
+static esp_err_t core_s3_speaker_i2s_start(void)
+{
+    if (app.speaker_tx) {
+        return ESP_OK;
+    }
+
+    esp_err_t ret = core_s3_speaker_enable_amp(true);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "core-s3 speaker amp start ret=%s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    i2s_chan_config_t chan_config = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
+    chan_config.dma_desc_num = 4;
+    chan_config.dma_frame_num = CORE_S3_SPEAKER_MAX_FRAME_SAMPLES;
+
+    ret = i2s_new_channel(&chan_config, &app.speaker_tx, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "core-s3 speaker i2s new channel ret=%s", esp_err_to_name(ret));
+        app.speaker_tx = NULL;
+        return ret;
+    }
+
+    i2s_std_config_t std_config = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(CORE_S3_SPEAKER_SAMPLE_RATE),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED,
+            .bclk = CONFIG_STACKCHAN_CORE_S3_SPEAKER_I2S_BCLK_GPIO,
+            .ws = CONFIG_STACKCHAN_CORE_S3_SPEAKER_I2S_WS_GPIO,
+            .dout = CONFIG_STACKCHAN_CORE_S3_SPEAKER_I2S_DOUT_GPIO,
+            .din = I2S_GPIO_UNUSED,
+            .invert_flags = {
+                .mclk_inv = false,
+                .bclk_inv = false,
+                .ws_inv = false,
+            },
+        },
+    };
+
+    ret = i2s_channel_init_std_mode(app.speaker_tx, &std_config);
+    if (ret == ESP_OK) {
+        ret = i2s_channel_enable(app.speaker_tx);
+    }
+    ESP_LOGI(TAG, "core-s3 speaker i2s start ret=%s sample_rate=%u channels=%u pins bclk=%d ws=%d dout=%d",
+             esp_err_to_name(ret),
+             (unsigned)CORE_S3_SPEAKER_SAMPLE_RATE,
+             (unsigned)CORE_S3_SPEAKER_CHANNELS,
+             CONFIG_STACKCHAN_CORE_S3_SPEAKER_I2S_BCLK_GPIO,
+             CONFIG_STACKCHAN_CORE_S3_SPEAKER_I2S_WS_GPIO,
+             CONFIG_STACKCHAN_CORE_S3_SPEAKER_I2S_DOUT_GPIO);
+    if (ret != ESP_OK) {
+        i2s_del_channel(app.speaker_tx);
+        app.speaker_tx = NULL;
+    }
+    log_heap("speaker-start");
+    return ret;
+}
+
+static void core_s3_speaker_i2s_stop(void)
+{
+    if (!app.speaker_tx) {
+        return;
+    }
+    esp_err_t disable_ret = i2s_channel_disable(app.speaker_tx);
+    if (disable_ret != ESP_OK) {
+        ESP_LOGW(TAG, "core-s3 speaker i2s disable ret=%s", esp_err_to_name(disable_ret));
+    }
+    esp_err_t del_ret = i2s_del_channel(app.speaker_tx);
+    if (del_ret != ESP_OK) {
+        ESP_LOGW(TAG, "core-s3 speaker i2s delete ret=%s", esp_err_to_name(del_ret));
+    }
+    app.speaker_tx = NULL;
+    esp_err_t amp_ret = core_s3_speaker_enable_amp(false);
+    if (amp_ret != ESP_OK) {
+        ESP_LOGW(TAG, "core-s3 speaker amp stop ret=%s", esp_err_to_name(amp_ret));
+    }
+    ESP_LOGI(TAG, "core-s3 speaker i2s stopped writes=%u samples=%u bytes=%u drops=%u short_writes=%u",
+             (unsigned)app.audio_rx_speaker_write_frames,
+             (unsigned)app.audio_rx_speaker_write_samples,
+             (unsigned)app.audio_rx_speaker_write_bytes,
+             (unsigned)app.audio_rx_speaker_drops,
+             (unsigned)app.audio_rx_speaker_short_writes);
+}
+
+static void core_s3_speaker_write_pcm(const int16_t *samples, uint32_t sample_count)
+{
+    if (!samples || sample_count == 0) {
+        return;
+    }
+    if (sample_count > CORE_S3_SPEAKER_MAX_FRAME_SAMPLES) {
+        sample_count = CORE_S3_SPEAKER_MAX_FRAME_SAMPLES;
+        app.audio_rx_speaker_drops++;
+    }
+    esp_err_t ret = core_s3_speaker_i2s_start();
+    if (ret != ESP_OK || !app.speaker_tx) {
+        app.audio_rx_speaker_drops++;
+        app.audio_rx_speaker_last_ret = ret;
+        if (app.audio_rx_speaker_drops == 1 || app.audio_rx_speaker_drops % 50 == 0) {
+            ESP_LOGW(TAG, "audio rx speaker drop count=%u start_ret=%s",
+                     (unsigned)app.audio_rx_speaker_drops,
+                     esp_err_to_name(ret));
+        }
+        return;
+    }
+
+    int16_t stereo[CORE_S3_SPEAKER_MAX_FRAME_SAMPLES * CORE_S3_SPEAKER_CHANNELS];
+    for (uint32_t i = 0; i < sample_count; i++) {
+        stereo[i * 2] = samples[i];
+        stereo[i * 2 + 1] = samples[i];
+    }
+
+    size_t bytes_written = 0;
+    size_t write_bytes = sample_count * CORE_S3_SPEAKER_CHANNELS * sizeof(stereo[0]);
+    ret = i2s_channel_write(app.speaker_tx, stereo, write_bytes, &bytes_written, 0);
+    app.audio_rx_speaker_last_ret = ret;
+    if (ret == ESP_OK && bytes_written > 0) {
+        app.audio_rx_speaker_write_frames++;
+        app.audio_rx_speaker_write_samples += sample_count;
+        app.audio_rx_speaker_write_bytes += bytes_written;
+        if (bytes_written < write_bytes) {
+            app.audio_rx_speaker_short_writes++;
+        }
+    } else {
+        app.audio_rx_speaker_drops++;
+    }
+
+    if (app.audio_rx_speaker_write_frames == 1 || app.audio_rx_speaker_write_frames % 50 == 0 || ret != ESP_OK || bytes_written < write_bytes) {
+        ESP_LOGI(TAG, "audio rx speaker writes=%u samples=%u bytes=%u drops=%u short_writes=%u last_ret=%s last_bytes=%u requested_bytes=%u",
+                 (unsigned)app.audio_rx_speaker_write_frames,
+                 (unsigned)app.audio_rx_speaker_write_samples,
+                 (unsigned)app.audio_rx_speaker_write_bytes,
+                 (unsigned)app.audio_rx_speaker_drops,
+                 (unsigned)app.audio_rx_speaker_short_writes,
+                 esp_err_to_name(ret),
+                 (unsigned)bytes_written,
+                 (unsigned)write_bytes);
+    }
+}
+#endif
+
 static int peer_audio_data_callback(esp_peer_audio_frame_t *frame, void *ctx)
 {
     app.audio_rx_frames++;
-    app.audio_rx_bytes += frame->size;
-    if (app.audio_rx_frames == 1 || app.audio_rx_frames % 50 == 0) {
-        ESP_LOGI(TAG, "audio rx frames=%u bytes=%u pts=%u last_size=%d",
+    uint32_t size = frame->size > 0 ? (uint32_t)frame->size : 0;
+    app.audio_rx_bytes += size;
+    app.audio_rx_last_size = size;
+    uint32_t pts_delta = app.audio_rx_frames > 1 ? frame->pts - app.audio_rx_last_pts : 0;
+    app.audio_rx_last_pts = frame->pts;
+    app.audio_rx_last_pts_delta = pts_delta;
+    bool pts_discontinuity = app.audio_rx_frames > 1 && pts_delta != 20;
+    if (pts_discontinuity) {
+        app.audio_rx_pts_discontinuities++;
+    }
+
+    if (!frame->data || frame->size <= 0) {
+        app.audio_rx_empty_frames++;
+        if (app.audio_rx_empty_frames == 1 || app.audio_rx_empty_frames % 10 == 0) {
+            ESP_LOGW(TAG, "audio rx empty frames=%u total_frames=%u pts=%u size=%d",
+                     (unsigned)app.audio_rx_empty_frames,
+                     (unsigned)app.audio_rx_frames,
+                     (unsigned)frame->pts,
+                     frame->size);
+        }
+        return 0;
+    }
+
+    int16_t decoded_min = INT16_MAX;
+    int16_t decoded_max = INT16_MIN;
+    uint32_t peak = 0;
+    uint64_t sum_squares = 0;
+#if CONFIG_STACKCHAN_MEDIA_CORE_S3_SPEAKER_SINK || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
+    int16_t speaker_pcm[CORE_S3_SPEAKER_MAX_FRAME_SAMPLES];
+    uint32_t speaker_samples = size < CORE_S3_SPEAKER_MAX_FRAME_SAMPLES ? size : CORE_S3_SPEAKER_MAX_FRAME_SAMPLES;
+#endif
+    for (int i = 0; i < frame->size; i++) {
+        int16_t sample = alaw_to_linear16(frame->data[i]);
+#if CONFIG_STACKCHAN_MEDIA_CORE_S3_SPEAKER_SINK || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
+        if ((uint32_t)i < speaker_samples) {
+            speaker_pcm[i] = sample;
+        }
+#endif
+        if (sample < decoded_min) {
+            decoded_min = sample;
+        }
+        if (sample > decoded_max) {
+            decoded_max = sample;
+        }
+        int32_t abs_sample = sample < 0 ? -(int32_t)sample : sample;
+        if ((uint32_t)abs_sample > peak) {
+            peak = (uint32_t)abs_sample;
+        }
+        sum_squares += (uint64_t)abs_sample * (uint64_t)abs_sample;
+    }
+
+    app.audio_rx_decode_samples += size;
+    app.audio_rx_decode_min = decoded_min;
+    app.audio_rx_decode_max = decoded_max;
+    app.audio_rx_decode_peak = peak;
+    app.audio_rx_decode_rms = isqrt_u64(sum_squares / size);
+
+#if CONFIG_STACKCHAN_MEDIA_CORE_S3_SPEAKER_SINK || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
+    core_s3_speaker_write_pcm(speaker_pcm, speaker_samples);
+#endif
+
+    if (app.audio_rx_frames == 1 || app.audio_rx_frames % 50 == 0 || pts_discontinuity) {
+        ESP_LOGI(TAG, "audio rx frames=%u bytes=%u empty=%u pts=%u pts_delta=%u pts_discont=%u last_size=%u",
                  (unsigned)app.audio_rx_frames,
                  (unsigned)app.audio_rx_bytes,
+                 (unsigned)app.audio_rx_empty_frames,
                  (unsigned)frame->pts,
-                 frame->size);
+                 (unsigned)pts_delta,
+                 (unsigned)app.audio_rx_pts_discontinuities,
+                 (unsigned)app.audio_rx_last_size);
+        ESP_LOGI(TAG, "audio rx decode samples=%u invalid=%u rms=%u peak=%u min=%d max=%d",
+                 (unsigned)app.audio_rx_decode_samples,
+                 (unsigned)app.audio_rx_decode_invalid,
+                 (unsigned)app.audio_rx_decode_rms,
+                 (unsigned)app.audio_rx_decode_peak,
+                 app.audio_rx_decode_min,
+                 app.audio_rx_decode_max);
     }
     return 0;
 }
@@ -363,20 +840,63 @@ static void peer_loop_task(void *arg)
     vTaskDelete(NULL);
 }
 
+
+static void log_audio_tx_result(const char *source, uint32_t sent_bytes, uint32_t pts, int ret)
+{
+    uint32_t pts_delta = app.audio_tx_frames ? pts - app.audio_tx_last_pts : 0;
+    app.audio_tx_last_pts = pts;
+    app.audio_tx_last_pts_delta = pts_delta;
+    app.audio_tx_last_size = sent_bytes;
+    if (app.audio_tx_min_size == 0 || sent_bytes < app.audio_tx_min_size) {
+        app.audio_tx_min_size = sent_bytes;
+    }
+    if (sent_bytes > app.audio_tx_max_size) {
+        app.audio_tx_max_size = sent_bytes;
+    }
+    if (ret == 0) {
+        app.audio_tx_frames++;
+        app.audio_tx_bytes += sent_bytes;
+        app.audio_tx_ret_ok++;
+    } else {
+        app.audio_tx_drops++;
+        app.audio_tx_ret_fail++;
+    }
+    if (app.audio_tx_frames == 1 || app.audio_tx_frames % 50 == 0 || ret != 0) {
+        ESP_LOGI(TAG, "%s audio tx frames=%u bytes=%u drops=%u ret_ok=%u ret_fail=%u last_ret=%d pts=%u pts_delta=%u last_size=%u size_min=%u size_max=%u",
+                 source,
+                 (unsigned)app.audio_tx_frames,
+                 (unsigned)app.audio_tx_bytes,
+                 (unsigned)app.audio_tx_drops,
+                 (unsigned)app.audio_tx_ret_ok,
+                 (unsigned)app.audio_tx_ret_fail,
+                 ret,
+                 (unsigned)pts,
+                 (unsigned)pts_delta,
+                 (unsigned)app.audio_tx_last_size,
+                 (unsigned)app.audio_tx_min_size,
+                 (unsigned)app.audio_tx_max_size);
+        log_heap(source);
+    }
+}
+
 static uint8_t linear16_to_alaw(int16_t sample)
 {
-    static const int16_t segment_end[] = {0x001f, 0x003f, 0x007f, 0x00ff, 0x01ff, 0x03ff, 0x07ff, 0x0fff};
-    int16_t pcm = sample >> 3;
+    const uint16_t segment_end[8] = { 0x1f, 0x3f, 0x7f, 0xff, 0x1ff, 0x3ff, 0x7ff, 0xfff };
+    uint16_t pcm;
     uint8_t mask;
+    uint8_t segment = 0;
+    uint8_t aval;
 
-    if (pcm >= 0) {
+    if (sample >= 0) {
+        pcm = (uint16_t)sample;
         mask = 0xd5;
     } else {
+        pcm = (uint16_t)(-sample - 1);
         mask = 0x55;
-        pcm = -pcm - 1;
     }
+    pcm >>= 3;
 
-    int segment = 0;
+
     while (segment < 8 && pcm > segment_end[segment]) {
         segment++;
     }
@@ -384,72 +904,359 @@ static uint8_t linear16_to_alaw(int16_t sample)
         return 0x7f ^ mask;
     }
 
-    uint8_t encoded = (uint8_t)(segment << 4);
+
+    aval = segment << 4;
     if (segment < 2) {
-        encoded |= (pcm >> 1) & 0x0f;
+        aval |= (pcm >> 1) & 0x0f;
     } else {
-        encoded |= (pcm >> segment) & 0x0f;
+        aval |= (pcm >> segment) & 0x0f;
     }
-    return encoded ^ mask;
+    return aval ^ mask;
 }
 
+#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
 static void generate_pcma_tone_frame(uint8_t *frame, size_t frame_size)
 {
     static uint32_t phase;
     for (size_t i = 0; i < frame_size; i++) {
-        int16_t sample = phase < (AUDIO_TEST_SAMPLE_RATE_HZ / 2) ? AUDIO_TEST_TONE_AMPLITUDE : -AUDIO_TEST_TONE_AMPLITUDE;
+        int16_t sample = phase < (CORE_S3_MIC_SAMPLE_RATE / 2U) ? AUDIO_TEST_TONE_AMPLITUDE : -AUDIO_TEST_TONE_AMPLITUDE;
         frame[i] = linear16_to_alaw(sample);
         phase += AUDIO_TEST_TONE_HZ;
-        if (phase >= AUDIO_TEST_SAMPLE_RATE_HZ) {
-            phase -= AUDIO_TEST_SAMPLE_RATE_HZ;
+        while (phase >= CORE_S3_MIC_SAMPLE_RATE) {
+            phase -= CORE_S3_MIC_SAMPLE_RATE;
         }
     }
 }
 
 static void audio_test_task(void *arg)
 {
-#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
     uint8_t frame[CONFIG_STACKCHAN_AUDIO_TEST_FRAME_BYTES];
-    ESP_LOGI(TAG, "audio test source start codec=PCMA sample_rate=%u channel=1 tone_hz=%u frame_bytes=%u interval_ms=%u",
-             (unsigned)AUDIO_TEST_SAMPLE_RATE_HZ,
-             (unsigned)AUDIO_TEST_TONE_HZ,
+
+    uint32_t pts = 0;
+    ESP_LOGI(TAG, "audio test source start codec=PCMA sample_rate=8000 channel=1 frame_bytes=%u interval_ms=%u tone_hz=%u",
+
              (unsigned)sizeof(frame),
-             (unsigned)CONFIG_STACKCHAN_AUDIO_TEST_INTERVAL_MS);
+             (unsigned)CONFIG_STACKCHAN_AUDIO_TEST_INTERVAL_MS,
+             (unsigned)AUDIO_TEST_TONE_HZ);
     log_heap("audio-test-start");
 
     while (app.audio_task_running) {
         if (app.peer && app.peer_connected) {
+
             generate_pcma_tone_frame(frame, sizeof(frame));
+
             esp_peer_audio_frame_t audio = {
-                .pts = (uint32_t)(esp_timer_get_time() / 1000),
+                .pts = pts,
                 .data = frame,
                 .size = sizeof(frame),
             };
             int ret = esp_peer_send_audio(app.peer, &audio);
-            if (ret == 0) {
-                app.audio_tx_frames++;
-                app.audio_tx_bytes += sizeof(frame);
-            } else {
-                app.audio_tx_drops++;
-            }
-            if (app.audio_tx_frames == 1 || app.audio_tx_frames % 50 == 0 || ret != 0) {
-                ESP_LOGI(TAG, "audio tx frames=%u bytes=%u drops=%u last_ret=%d",
-                         (unsigned)app.audio_tx_frames,
-                         (unsigned)app.audio_tx_bytes,
-                         (unsigned)app.audio_tx_drops,
-                         ret);
-                log_heap("audio-test-running");
-            }
+            log_audio_tx_result("audio-test", sizeof(frame), pts, ret);
+            pts += CONFIG_STACKCHAN_AUDIO_TEST_INTERVAL_MS;
         }
         vTaskDelay(pdMS_TO_TICKS(CONFIG_STACKCHAN_AUDIO_TEST_INTERVAL_MS));
     }
-#endif
     vTaskDelete(NULL);
 }
+#endif
+
+#if CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
+typedef struct {
+    uint8_t reg;
+    uint8_t value;
+} es7210_reg_value_t;
+
+static esp_err_t core_s3_mic_write_es7210_reg(i2c_master_dev_handle_t codec, uint8_t reg, uint8_t value)
+{
+    uint8_t data[2] = { reg, value };
+    esp_err_t ret = ESP_FAIL;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        ret = i2c_master_transmit(codec, data, sizeof(data), pdMS_TO_TICKS(100));
+        if (ret == ESP_OK) {
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "core-s3 mic es7210 write retry reg=0x%02x value=0x%02x attempt=%d ret=%s",
+                 reg,
+                 value,
+                 attempt,
+                 esp_err_to_name(ret));
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    return ret;
+}
+
+static esp_err_t core_s3_mic_configure_es7210(i2c_master_bus_handle_t bus)
+{
+    i2c_master_dev_handle_t codec = NULL;
+    i2c_device_config_t codec_config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = CORE_S3_ES7210_I2C_ADDR,
+        .scl_speed_hz = 400000,
+    };
+    esp_err_t ret = i2c_master_bus_add_device(bus, &codec_config, &codec);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "core-s3 mic es7210 add device ret=%s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    static const es7210_reg_value_t init_sequence[] = {
+        { 0x00, 0xff }, // RESET_CTL
+        { 0x00, 0x41 }, // RESET_CTL
+        { 0x01, 0x1f }, // CLK_ON_OFF: enable clocks during setup
+        { 0x06, 0x00 }, // DIGITAL_PDN: power up digital blocks
+        { 0x07, 0x20 }, // ADC_OSR
+        { 0x08, 0x10 }, // MODE_CFG
+        { 0x09, 0x30 }, // TCT0_CHPINI
+        { 0x0a, 0x30 }, // TCT1_CHPINI
+        { 0x20, 0x0a }, // ADC34_HPF2
+        { 0x21, 0x2a }, // ADC34_HPF1
+        { 0x22, 0x0a }, // ADC12_HPF2
+        { 0x23, 0x2a }, // ADC12_HPF1
+        { 0x02, 0xc1 },
+        { 0x04, 0x01 },
+        { 0x05, 0x00 },
+        { 0x11, 0x60 },
+        { 0x40, 0x42 }, // ANALOG_SYS
+        { 0x41, 0x70 }, // MICBIAS12
+        { 0x42, 0x70 }, // MICBIAS34
+        { 0x43, 0x1b }, // MIC1_GAIN
+        { 0x44, 0x1b }, // MIC2_GAIN
+        { 0x45, 0x00 }, // MIC3_GAIN
+        { 0x46, 0x00 }, // MIC4_GAIN
+        { 0x47, 0x00 }, // MIC1_LP
+        { 0x48, 0x00 }, // MIC2_LP
+        { 0x49, 0x00 }, // MIC3_LP
+        { 0x4a, 0x00 }, // MIC4_LP
+        { 0x4b, 0x00 }, // MIC12_PDN: enable mic 1/2
+        { 0x4c, 0xff }, // MIC34_PDN: power down unused mic 3/4
+        { 0x01, 0x14 }, // CLK_ON_OFF: leave ADC clocks on
+    };
+
+    for (size_t i = 0; i < sizeof(init_sequence) / sizeof(init_sequence[0]); i++) {
+        ret = core_s3_mic_write_es7210_reg(codec, init_sequence[i].reg, init_sequence[i].value);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "core-s3 mic es7210 write reg=0x%02x value=0x%02x ret=%s",
+                     init_sequence[i].reg,
+                     init_sequence[i].value,
+                     esp_err_to_name(ret));
+            break;
+        }
+        if (init_sequence[i].reg == 0x00) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+    }
+
+    esp_err_t del_ret = i2c_master_bus_rm_device(codec);
+    if (del_ret != ESP_OK) {
+        ESP_LOGW(TAG, "core-s3 mic es7210 remove device ret=%s", esp_err_to_name(del_ret));
+    }
+    ESP_LOGI(TAG, "core-s3 mic es7210 configure ret=%s registers=%u",
+             esp_err_to_name(ret),
+             (unsigned)(sizeof(init_sequence) / sizeof(init_sequence[0])));
+    return ret;
+}
+
+static esp_err_t core_s3_mic_probe_and_configure_es7210(void)
+{
+    i2c_master_bus_handle_t bus = NULL;
+    i2c_master_bus_config_t bus_config = {
+        .i2c_port = I2C_NUM_0,
+        .sda_io_num = CONFIG_STACKCHAN_CORE_S3_MIC_I2C_SDA_GPIO,
+        .scl_io_num = CONFIG_STACKCHAN_CORE_S3_MIC_I2C_SCL_GPIO,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    esp_err_t ret = i2c_new_master_bus(&bus_config, &bus);
+    if (ret == ESP_OK) {
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            ret = i2c_master_probe(bus, CORE_S3_ES7210_I2C_ADDR, pdMS_TO_TICKS(100));
+            ESP_LOGI(TAG, "core-s3 mic es7210 probe addr=0x%02x sda=%d scl=%d attempt=%d ret=%s",
+                     CORE_S3_ES7210_I2C_ADDR,
+                     CONFIG_STACKCHAN_CORE_S3_MIC_I2C_SDA_GPIO,
+                     CONFIG_STACKCHAN_CORE_S3_MIC_I2C_SCL_GPIO,
+                     attempt,
+                     esp_err_to_name(ret));
+            if (ret == ESP_OK) {
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
+    if (ret == ESP_OK) {
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            ret = core_s3_mic_configure_es7210(bus);
+            if (ret == ESP_OK) {
+                break;
+            }
+            ESP_LOGW(TAG, "core-s3 mic es7210 configure retry attempt=%d ret=%s",
+                     attempt,
+                     esp_err_to_name(ret));
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
+    if (bus) {
+        esp_err_t del_ret = i2c_del_master_bus(bus);
+        if (del_ret != ESP_OK) {
+            ESP_LOGW(TAG, "core-s3 mic i2c bus cleanup ret=%s", esp_err_to_name(del_ret));
+        }
+    }
+    return ret;
+}
+
+static esp_err_t core_s3_mic_i2s_init(i2s_chan_handle_t *out_rx)
+{
+    i2s_chan_config_t chan_config = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
+    chan_config.dma_desc_num = 4;
+    chan_config.dma_frame_num = CONFIG_STACKCHAN_CORE_S3_MIC_FRAME_SAMPLES;
+
+    esp_err_t ret = i2s_new_channel(&chan_config, NULL, out_rx);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "core-s3 mic i2s new channel ret=%s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    i2s_tdm_config_t tdm_config = {
+        .clk_cfg = I2S_TDM_CLK_DEFAULT_CONFIG(CORE_S3_MIC_SAMPLE_RATE),
+        .slot_cfg = I2S_TDM_PHILIPS_SLOT_DEFAULT_CONFIG(
+            I2S_DATA_BIT_WIDTH_16BIT,
+            I2S_SLOT_MODE_STEREO,
+            I2S_TDM_SLOT0 | I2S_TDM_SLOT1 | I2S_TDM_SLOT2 | I2S_TDM_SLOT3),
+        .gpio_cfg = {
+            .mclk = CONFIG_STACKCHAN_CORE_S3_MIC_I2S_MCLK_GPIO,
+            .bclk = CONFIG_STACKCHAN_CORE_S3_MIC_I2S_BCLK_GPIO,
+            .ws = CONFIG_STACKCHAN_CORE_S3_MIC_I2S_WS_GPIO,
+            .dout = I2S_GPIO_UNUSED,
+            .din = CONFIG_STACKCHAN_CORE_S3_MIC_I2S_DIN_GPIO,
+        },
+    };
+
+    ret = i2s_channel_init_tdm_mode(*out_rx, &tdm_config);
+    if (ret == ESP_OK) {
+        ret = i2s_channel_enable(*out_rx);
+    }
+    ESP_LOGI(TAG, "core-s3 mic i2s init ret=%s sample_rate=%u frame_samples=%u pins mclk=%d bclk=%d ws=%d din=%d",
+             esp_err_to_name(ret),
+             (unsigned)CORE_S3_MIC_SAMPLE_RATE,
+             (unsigned)CONFIG_STACKCHAN_CORE_S3_MIC_FRAME_SAMPLES,
+             CONFIG_STACKCHAN_CORE_S3_MIC_I2S_MCLK_GPIO,
+             CONFIG_STACKCHAN_CORE_S3_MIC_I2S_BCLK_GPIO,
+             CONFIG_STACKCHAN_CORE_S3_MIC_I2S_WS_GPIO,
+             CONFIG_STACKCHAN_CORE_S3_MIC_I2S_DIN_GPIO);
+    return ret;
+}
+
+static void audio_mic_task(void *arg)
+{
+    i2s_chan_handle_t rx = NULL;
+    int16_t pcm[CONFIG_STACKCHAN_CORE_S3_MIC_FRAME_SAMPLES * CORE_S3_MIC_TDM_CHANNELS];
+    uint8_t pcma[CONFIG_STACKCHAN_CORE_S3_MIC_FRAME_SAMPLES];
+    uint32_t log_ticks = 0;
+    uint32_t pts = 0;
+
+    ESP_LOGI(TAG, "core-s3 mic source start codec=PCMA/G711A sample_rate=8000 channel=1 capture_rate=%u frame_samples=%u frame_ms=%u",
+             (unsigned)CORE_S3_MIC_SAMPLE_RATE,
+             (unsigned)CONFIG_STACKCHAN_CORE_S3_MIC_FRAME_SAMPLES,
+             (unsigned)CORE_S3_MIC_FRAME_DURATION_MS);
+    ESP_LOGW(TAG, "core-s3 mic uses raw I2S bridge because esp_capture is not in this component set; replace with esp_capture audio_dev_src/sink when that dependency is adopted");
+    log_heap("mic-start");
+    esp_err_t codec_ret = core_s3_mic_probe_and_configure_es7210();
+    if (codec_ret != ESP_OK) {
+        ESP_LOGE(TAG, "core-s3 mic source stopped: es7210 probe/config failed ret=%s", esp_err_to_name(codec_ret));
+        app.audio_task_running = false;
+    }
+    if (app.audio_task_running && core_s3_mic_i2s_init(&rx) != ESP_OK) {
+        ESP_LOGE(TAG, "core-s3 mic source stopped: i2s init failed");
+        app.audio_task_running = false;
+    }
+
+    while (app.audio_task_running && rx) {
+        size_t bytes_read = 0;
+        esp_err_t read_ret = i2s_channel_read(rx, pcm, sizeof(pcm), &bytes_read, pdMS_TO_TICKS(200));
+        if (read_ret != ESP_OK) {
+            app.mic_read_failures++;
+            if (app.mic_read_failures == 1 || app.mic_read_failures % 50 == 0) {
+                ESP_LOGW(TAG, "core-s3 mic read failure count=%u ret=%s",
+                         (unsigned)app.mic_read_failures,
+                         esp_err_to_name(read_ret));
+            }
+            continue;
+        }
+        if (bytes_read < sizeof(pcm)) {
+            app.mic_short_reads++;
+        }
+
+        size_t samples_read = bytes_read / sizeof(pcm[0]);
+        size_t frames_read = samples_read / CORE_S3_MIC_TDM_CHANNELS;
+        if (frames_read > CONFIG_STACKCHAN_CORE_S3_MIC_FRAME_SAMPLES) {
+            frames_read = CONFIG_STACKCHAN_CORE_S3_MIC_FRAME_SAMPLES;
+        }
+        app.mic_acquire_frames++;
+
+        uint32_t peak = 0;
+        uint64_t sum_squares = 0;
+        for (size_t i = 0; i < frames_read; i++) {
+            int16_t sample = pcm[i * CORE_S3_MIC_TDM_CHANNELS];
+            int32_t abs_sample = sample < 0 ? -(int32_t)sample : sample;
+            if (abs_sample > peak) {
+                peak = abs_sample;
+            }
+            if (abs_sample >= 32767) {
+                app.mic_conversion_clips++;
+            }
+            sum_squares += (uint64_t)abs_sample * (uint64_t)abs_sample;
+            pcma[i] = linear16_to_alaw(sample);
+        }
+        app.mic_samples += frames_read;
+
+        uint32_t rms = frames_read ? isqrt_u64(sum_squares / frames_read) : 0;
+        log_ticks++;
+        if (log_ticks == 1 || log_ticks % 50 == 0 || app.mic_short_reads) {
+            ESP_LOGI(TAG, "core-s3 mic acquire=%u samples=%u rms=%u peak=%u read_failures=%u short_reads=%u clips=%u bytes_read=%u frame_samples=%u pts=%u",
+                     (unsigned)app.mic_acquire_frames,
+                     (unsigned)app.mic_samples,
+                     (unsigned)rms,
+                     (unsigned)peak,
+                     (unsigned)app.mic_read_failures,
+                     (unsigned)app.mic_short_reads,
+                     (unsigned)app.mic_conversion_clips,
+                     (unsigned)bytes_read,
+                     (unsigned)frames_read,
+                     (unsigned)pts);
+        }
+
+        if (frames_read > 0 && app.peer && app.peer_connected) {
+            esp_peer_audio_frame_t audio = {
+                .pts = pts,
+                .data = pcma,
+                .size = frames_read,
+            };
+            int ret = esp_peer_send_audio(app.peer, &audio);
+            log_audio_tx_result("core-s3-mic", frames_read, pts, ret);
+        }
+        pts += (uint32_t)((frames_read * 1000U) / CORE_S3_MIC_SAMPLE_RATE);
+    }
+    if (rx) {
+        esp_err_t disable_ret = i2s_channel_disable(rx);
+        if (disable_ret != ESP_OK) {
+            ESP_LOGW(TAG, "core-s3 mic i2s disable ret=%s", esp_err_to_name(disable_ret));
+        }
+        esp_err_t del_ret = i2s_del_channel(rx);
+        if (del_ret != ESP_OK) {
+            ESP_LOGW(TAG, "core-s3 mic i2s delete ret=%s", esp_err_to_name(del_ret));
+        }
+    }
+    vTaskDelete(NULL);
+}
+#endif
 
 static esp_peer_media_dir_t configured_audio_dir(void)
 {
-#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
+#if CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
+    return ESP_PEER_MEDIA_DIR_SEND_RECV;
+#elif CONFIG_STACKCHAN_MEDIA_CORE_S3_SPEAKER_SINK
+    return ESP_PEER_MEDIA_DIR_RECV_ONLY;
+#elif CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
     return ESP_PEER_MEDIA_DIR_SEND_ONLY;
 #else
     return ESP_PEER_MEDIA_DIR_NONE;
@@ -460,6 +1267,12 @@ static const char *configured_media_mode(void)
 {
 #if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
     return "audio-test-source";
+#elif CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
+    return "core-s3-mic-duplex";
+#elif CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
+    return "core-s3-mic-source";
+#elif CONFIG_STACKCHAN_MEDIA_CORE_S3_SPEAKER_SINK
+    return "core-s3-speaker-sink";
 #elif CONFIG_STACKCHAN_MEDIA_VIDEO_PLACEHOLDER
     return "video-placeholder";
 #else
@@ -496,8 +1309,11 @@ static void close_peer_for_reoffer(void)
     }
 
     ESP_LOGI(TAG, "closing stale peer before reoffer");
-#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
+#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
     app.audio_task_running = false;
+#endif
+#if CONFIG_STACKCHAN_MEDIA_CORE_S3_SPEAKER_SINK || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
+    core_s3_speaker_i2s_stop();
 #endif
     app.peer_loop_running = false;
     vTaskDelay(pdMS_TO_TICKS(80));
@@ -596,10 +1412,24 @@ static esp_err_t ensure_peer_open(void)
         ESP_LOGE(TAG, "failed to start peer loop task");
         return ESP_ERR_NO_MEM;
     }
-#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
+
+    ret = esp_peer_new_connection(app.peer);
+    ESP_LOGI(TAG, "esp_peer_new_connection ret=%d", ret);
+    if (ret != 0) {
+        return ESP_FAIL;
+    }
+#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
     app.audio_task_running = true;
+#endif
+#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
     if (xTaskCreate(audio_test_task, "audio_test", 4096, NULL, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "failed to start audio test task");
+        app.audio_task_running = false;
+        return ESP_ERR_NO_MEM;
+    }
+#elif CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
+    if (xTaskCreate(audio_mic_task, "audio_mic", 6144, NULL, 5, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "failed to start CoreS3 mic task");
         app.audio_task_running = false;
         return ESP_ERR_NO_MEM;
     }
@@ -770,6 +1600,7 @@ static esp_err_t start_websocket(void)
         .uri = app.ws_url,
         .network_timeout_ms = 8000,
         .buffer_size = HTTP_BUF_SIZE,
+        .task_stack = 12288,
     };
     app.ws = esp_websocket_client_init(&config);
     if (!app.ws) {

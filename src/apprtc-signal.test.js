@@ -65,6 +65,17 @@ function closeSocket(socket) {
   });
 }
 
+async function waitForCondition(condition, { timeout = 1000, interval = 10 } = {}) {
+  const deadline = Date.now() + timeout;
+  let lastResult;
+  while (Date.now() < deadline) {
+    lastResult = await condition();
+    if (lastResult) return lastResult;
+    await new Promise((resolve) => setTimeout(resolve, interval));
+  }
+  return lastResult;
+}
+
 describe('AppRTC-compatible signaling server', () => {
   it('detects direct CLI execution when Node receives a relative script path', () => {
     assert.equal(isDirectRun(new URL('./apprtc-signal.js', import.meta.url).href, 'src/apprtc-signal.js'), true);
@@ -360,6 +371,10 @@ describe('AppRTC-compatible signaling server', () => {
       socket.once('close', resolve);
       socket.close();
     });
+    await waitForCondition(async () => {
+      const rooms = await readJson(await fetch(`${baseUrl}/debug/rooms`));
+      return !rooms.stackchan;
+    });
 
     const second = await readJson(await fetch(`${baseUrl}/join/stackchan`, { method: 'POST' }));
 
@@ -372,10 +387,12 @@ describe('AppRTC-compatible signaling server', () => {
 
     assert.equal(page.status, 200);
     assert.equal(page.headers.get('content-type'), 'text/html; charset=utf-8');
+    assert.equal(page.headers.get('cache-control'), 'no-store');
     assert.match(await page.text(), /ESP32-S3 WebRTC browser probe/);
 
     assert.equal(script.status, 200);
     assert.equal(script.headers.get('content-type'), 'text/javascript; charset=utf-8');
+    assert.equal(script.headers.get('cache-control'), 'no-store');
     assert.match(await script.text(), /function parseProbeConfig/);
   });
 

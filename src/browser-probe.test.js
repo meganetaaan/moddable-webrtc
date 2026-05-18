@@ -6,11 +6,20 @@ import {
   buildOfferMessage,
   buildWsUrl,
   describeDataChannelMessage,
+  formatMediaElementState,
   normalizeRemoteCandidate,
   parseProbeConfig,
+
+  explainCandidateConnectivity,
   summarizeCandidate,
+  summarizeIceCandidate,
   summarizeIceServers,
+  summarizeInboundRtpReport,
+  summarizeOutboundRtpReport,
+
   summarizeSdpMedia,
+  summarizeSelectedCandidatePair,
+  ensureAudioDuplexSender,
 } from './browser-probe.js';
 
 describe('browser probe helpers', () => {
@@ -38,6 +47,39 @@ describe('browser probe helpers', () => {
 
   it('ignores unknown media modes', () => {
     assert.equal(parseProbeConfig('?media=screen', 'http://127.0.0.1:18091').media, 'none');
+  });
+
+  it('treats media=mic as a browser audio recvonly request', () => {
+    assert.equal(parseProbeConfig('?media=mic', 'http://127.0.0.1:18090').media, 'audio');
+  });
+
+  it('parses media=audio-duplex as bidirectional audio', () => {
+    assert.equal(parseProbeConfig('?media=audio-duplex', 'http://127.0.0.1:18090').media, 'audio-duplex');
+  });
+
+  it('parses media=audio-tone as a browser-generated outbound audio diagnostic', () => {
+    assert.equal(parseProbeConfig('?media=audio-tone', 'http://127.0.0.1:18090').media, 'audio-tone');
+  });
+
+  it('attaches a browser mic track to the remote audio transceiver before creating an answer', async () => {
+    const calls = [];
+    const track = { kind: 'audio', id: 'mic-1' };
+    const stream = { getAudioTracks: () => [track] };
+    const transceiver = {
+      receiver: { track: { kind: 'audio' } },
+      sender: {
+        track: null,
+        replaceTrack: async (nextTrack) => calls.push(['replaceTrack', nextTrack]),
+      },
+      direction: 'recvonly',
+    };
+    const peer = { getTransceivers: () => [transceiver] };
+
+    const result = await ensureAudioDuplexSender(peer, stream);
+
+    assert.equal(result, true);
+    assert.deepEqual(calls, [['replaceTrack', track]]);
+    assert.equal(transceiver.direction, 'sendrecv');
   });
 
   it('builds raw-candidate AppRTC messages instead of serializing the full RTCIceCandidate object', () => {
@@ -147,6 +189,89 @@ describe('browser probe helpers', () => {
     assert.equal(
       describeDataChannelMessage('{"type":"pong","from":"cores3"}'),
       'datachannel pong from=cores3 payload={"type":"pong","from":"cores3"}',
+    );
+  });
+
+
+  it('summarizes browser ICE candidates so LAN reachability failures are obvious', () => {
+    assert.equal(
+      summarizeIceCandidate('candidate:2365990239 1 udp 2113937151 e864669a-b16f-4dd3-9f0c-8eb2c2ea7009.local 52455 typ host'),
+      'candidate type=host protocol=udp address=e864669a-b16f-4dd3-9f0c-8eb2c2ea7009.local mdns=true port=52455',
+    );
+    assert.equal(
+      summarizeIceCandidate('candidate:2140150961 1 udp 1677729535 153.169.14.35 47597 typ srflx raddr 0.0.0.0 rport 0'),
+      'candidate type=srflx protocol=udp address=153.169.14.35 port=47597',
+    );
+  });
+
+  it('explains browser candidates that ESP peers usually cannot use directly', () => {
+    assert.equal(
+      explainCandidateConnectivity('candidate:2365990239 1 udp 2113937151 e864669a-b16f-4dd3-9f0c-8eb2c2ea7009.local 52455 typ host'),
+      'candidate warning: host candidate uses mDNS .local address; CoreS3/esp_peer usually cannot resolve it, so use a LAN browser with mDNS disabled or TURN relay',
+    );
+    assert.equal(
+      explainCandidateConnectivity('candidate:2140150961 1 udp 1677729535 153.169.14.35 47597 typ srflx raddr 0.0.0.0 rport 0'),
+      'candidate warning: srflx candidate is public/NAT-reflexive; a same-LAN CoreS3 may not be able to send back to it without TURN or a usable host candidate',
+    );
+    assert.equal(
+      explainCandidateConnectivity('candidate:842163049 1 udp 1677729535 203.0.113.10 59902 typ relay raddr 0.0.0.0 rport 0'),
+      null,
+    );
+  });
+
+  it('summarizes selected ICE candidate-pair stats when transport is established', () => {
+    const stats = new Map([
+      ['transport-1', { type: 'transport', selectedCandidatePairId: 'pair-1' }],
+      ['pair-1', { type: 'candidate-pair', state: 'succeeded', nominated: true, localCandidateId: 'local-1', remoteCandidateId: 'remote-1', bytesSent: 42, bytesReceived: 84 }],
+      ['local-1', { type: 'local-candidate', candidateType: 'host', protocol: 'udp', address: '192.168.7.10', port: 50000 }],
+      ['remote-1', { type: 'remote-candidate', candidateType: 'host', protocol: 'udp', address: '192.168.7.125', port: 50712 }],
+    ]);
+    assert.equal(
+      summarizeSelectedCandidatePair(stats),
+      'ice selected-pair state=succeeded nominated=true local=host/udp/192.168.7.10:50000 remote=host/udp/192.168.7.125:50712 bytesSent=42 bytesReceived=84',
+    );
+  });
+
+  it('summarizes missing selected ICE candidate-pair stats before connectivity succeeds', () => {
+    assert.equal(summarizeSelectedCandidatePair(new Map()), 'ice selected-pair none');
+  });
+
+  it('summarizes audio inbound RTP with packet, byte, and sample evidence', () => {
+    assert.equal(
+      summarizeInboundRtpReport({
+        type: 'inbound-rtp',
+        kind: 'audio',
+        packetsReceived: 12,
+        bytesReceived: 1920,
+        totalSamplesReceived: 960,
+      }),
+      'stats audio packets=12 bytes=1920 evidence=960',
+    );
+  });
+
+  it('summarizes audio outbound RTP with packet and byte evidence', () => {
+    assert.equal(
+      summarizeOutboundRtpReport({
+        type: 'outbound-rtp',
+        kind: 'audio',
+        packetsSent: 12,
+        bytesSent: 1920,
+        totalSamplesSent: 960,
+      }),
+      'stats outbound audio packets=12 bytes=1920 evidence=960',
+    );
+  });
+
+  it('formats audio element playback state for audible-proof logs', () => {
+    assert.equal(
+      formatMediaElementState('audio', 'play-resolved', {
+        paused: false,
+        muted: false,
+        volume: 1,
+        readyState: 4,
+        currentTime: 0.25,
+      }),
+      'audio element play-resolved paused=false muted=false volume=1 readyState=4 currentTime=0.250',
     );
   });
 });
