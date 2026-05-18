@@ -7,3 +7,6 @@ coverage/
 firmware/esp-idf-datachannel/build/
 firmware/esp-idf-datachannel/managed_components/
 firmware/esp-idf-datachannel/sdkconfig
+firmware/esp-idf-speaker-tone/build/
+firmware/esp-idf-speaker-tone/managed_components/
+firmware/esp-idf-speaker-tone/sdkconfig
