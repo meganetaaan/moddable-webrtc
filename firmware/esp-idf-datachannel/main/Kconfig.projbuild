@@ -83,6 +83,14 @@ config STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
         esp_capture audio_dev_src/sink path when that dependency is adopted.
         Keep the generated source as the default known-good transport baseline.
 
+config STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
+    bool "Audio: CoreS3 ES7210 microphone source + browser receive decode"
+    help
+        Negotiate sendrecv audio explicitly for bidirectional proof. CoreS3
+        keeps the ES7210 microphone -> browser PCMA path running, receives
+        browser microphone PCMA frames, decodes them to PCM16, and logs receive
+        and decode counters. This mode does not enable speaker I2S output.
+
 config STACKCHAN_MEDIA_VIDEO_PLACEHOLDER
     bool "Video placeholder: documented only"
     help
@@ -110,38 +118,38 @@ config STACKCHAN_CORE_S3_MIC_FRAME_SAMPLES
     int "CoreS3 microphone frame samples"
     default 160
     range 80 320
-    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
+    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE || STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
     help
         160 samples is 20 ms at the default 8 kHz sample rate.
 
 config STACKCHAN_CORE_S3_MIC_I2C_SDA_GPIO
     int "CoreS3 ES7210 I2C SDA GPIO"
     default 12
-    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
+    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE || STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
 
 config STACKCHAN_CORE_S3_MIC_I2C_SCL_GPIO
     int "CoreS3 ES7210 I2C SCL GPIO"
     default 11
-    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
+    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE || STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
 
 config STACKCHAN_CORE_S3_MIC_I2S_MCLK_GPIO
     int "CoreS3 ES7210 I2S MCLK GPIO"
     default 0
-    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
+    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE || STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
 
 config STACKCHAN_CORE_S3_MIC_I2S_BCLK_GPIO
     int "CoreS3 ES7210 I2S BCLK GPIO"
     default 34
-    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
+    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE || STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
 
 config STACKCHAN_CORE_S3_MIC_I2S_WS_GPIO
     int "CoreS3 ES7210 I2S WS GPIO"
     default 33
-    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
+    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE || STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
 
 config STACKCHAN_CORE_S3_MIC_I2S_DIN_GPIO
     int "CoreS3 ES7210 I2S DATO-to-ESP GPIO"
     default 14
-    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
+    depends on STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE || STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
 
 endmenu

@@ -3,7 +3,7 @@ export function parseProbeConfig(search = globalThis.location?.search ?? '', ori
   const role = params.get('role') === 'answerer' ? 'answerer' : 'offerer';
   const iceTransportPolicy = params.get('icePolicy') === 'relay' ? 'relay' : 'all';
   const requestedMedia = params.get('media') === 'mic' ? 'audio' : params.get('media');
-  const media = ['audio', 'video'].includes(requestedMedia) ? requestedMedia : 'none';
+  const media = ['audio', 'audio-duplex', 'video'].includes(requestedMedia) ? requestedMedia : 'none';
 
   return {
     signalBaseUrl: params.get('signal') || origin,
@@ -144,6 +144,13 @@ export function summarizeInboundRtpReport(report) {
   return `stats ${report.kind} packets=${report.packetsReceived ?? 0} bytes=${report.bytesReceived ?? 0} evidence=${evidence}`;
 }
 
+export function summarizeOutboundRtpReport(report) {
+  const evidence = report.kind === 'audio'
+    ? (report.totalSamplesSent ?? report.packetsSent ?? 0)
+    : (report.framesEncoded ?? report.packetsSent ?? 0);
+  return `stats outbound ${report.kind} packets=${report.packetsSent ?? 0} bytes=${report.bytesSent ?? 0} evidence=${evidence}`;
+}
+
 export function summarizeIceCandidate(candidate = '') {
   const parts = candidate.trim().split(/\s+/);
   const typIndex = parts.indexOf('typ');
@@ -222,10 +229,26 @@ function attachRemoteTrack(track, streams) {
   }
 }
 
-function configureMedia(peer, config) {
+async function configureMedia(peer, config) {
   if (config.media === 'audio') {
     peer.addTransceiver('audio', { direction: 'recvonly' });
     appendLog('media requested audio recvonly');
+  } else if (config.media === 'audio-duplex') {
+    appendLog('media requested audio sendrecv');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const tracks = stream.getAudioTracks();
+      appendLog(`browser mic acquired tracks=${tracks.length}`);
+      if (tracks[0]) {
+        peer.addTransceiver(tracks[0], { streams: [stream], direction: 'sendrecv' });
+      } else {
+        peer.addTransceiver('audio', { direction: 'recvonly' });
+        appendLog('browser mic acquired no audio track; falling back to recvonly');
+      }
+    } catch (error) {
+      appendLog(`browser mic error ${error.name ?? 'Error'} ${error.message}`);
+      throw error;
+    }
   } else if (config.media === 'video') {
     peer.addTransceiver('video', { direction: 'recvonly' });
     appendLog('media requested video recvonly');
@@ -236,13 +259,16 @@ function configureMedia(peer, config) {
 
 function startStatsLog(peer, config) {
   if (config.media === 'none') return;
+  const statsKind = config.media === 'audio-duplex' ? 'audio' : config.media;
   setInterval(async () => {
     try {
       const stats = await peer.getStats();
       appendLog(summarizeSelectedCandidatePair(stats));
       for (const report of stats.values()) {
-        if (report.type === 'inbound-rtp' && !report.isRemote && report.kind === config.media) {
+        if (report.type === 'inbound-rtp' && !report.isRemote && report.kind === statsKind) {
           appendLog(summarizeInboundRtpReport(report));
+        } else if (report.type === 'outbound-rtp' && !report.isRemote && report.kind === statsKind) {
+          appendLog(summarizeOutboundRtpReport(report));
         }
       }
     } catch (error) {
@@ -309,7 +335,7 @@ async function createPeerConnection(config, sendMessage) {
     bindDataChannel(channel, { sendPingOnOpen: true });
   };
 
-  configureMedia(peer, config);
+  await configureMedia(peer, config);
   startStatsLog(peer, config);
   return peer;
 }

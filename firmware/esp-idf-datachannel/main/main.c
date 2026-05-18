@@ -76,6 +76,17 @@ typedef struct {
     uint32_t mic_conversion_clips;
     uint32_t audio_rx_frames;
     uint32_t audio_rx_bytes;
+    uint32_t audio_rx_empty_frames;
+    uint32_t audio_rx_last_pts;
+    uint32_t audio_rx_last_pts_delta;
+    uint32_t audio_rx_last_size;
+    uint32_t audio_rx_pts_discontinuities;
+    uint32_t audio_rx_decode_samples;
+    uint32_t audio_rx_decode_invalid;
+    uint32_t audio_rx_decode_peak;
+    int16_t audio_rx_decode_min;
+    int16_t audio_rx_decode_max;
+    uint32_t audio_rx_decode_rms;
     uint32_t data_rx_frames;
     uint16_t data_stream_id;
 } app_ctx_t;
@@ -301,16 +312,113 @@ static int peer_audio_info_callback(esp_peer_audio_stream_info_t *info, void *ct
     return 0;
 }
 
+static uint32_t isqrt_u64(uint64_t value)
+{
+    uint64_t bit = 1ULL << 62;
+    while (bit > value) {
+        bit >>= 2;
+    }
+    uint32_t result = 0;
+    while (bit) {
+        if (value >= result + bit) {
+            value -= result + bit;
+            result = (result >> 1) + bit;
+        } else {
+            result >>= 1;
+        }
+        bit >>= 2;
+    }
+    return result;
+}
+
+static int16_t alaw_to_linear16(uint8_t sample)
+{
+    sample ^= 0x55;
+    int16_t value = (sample & 0x0f) << 4;
+    uint8_t segment = (sample & 0x70) >> 4;
+
+    switch (segment) {
+    case 0:
+        value += 8;
+        break;
+    case 1:
+        value += 0x108;
+        break;
+    default:
+        value += 0x108;
+        value <<= segment - 1;
+        break;
+    }
+    return (sample & 0x80) ? value : -value;
+}
+
 static int peer_audio_data_callback(esp_peer_audio_frame_t *frame, void *ctx)
 {
     app.audio_rx_frames++;
-    app.audio_rx_bytes += frame->size;
-    if (app.audio_rx_frames == 1 || app.audio_rx_frames % 50 == 0) {
-        ESP_LOGI(TAG, "audio rx frames=%u bytes=%u pts=%u last_size=%d",
+    uint32_t size = frame->size > 0 ? (uint32_t)frame->size : 0;
+    app.audio_rx_bytes += size;
+    app.audio_rx_last_size = size;
+    uint32_t pts_delta = app.audio_rx_frames > 1 ? frame->pts - app.audio_rx_last_pts : 0;
+    app.audio_rx_last_pts = frame->pts;
+    app.audio_rx_last_pts_delta = pts_delta;
+    bool pts_discontinuity = app.audio_rx_frames > 1 && pts_delta != 20;
+    if (pts_discontinuity) {
+        app.audio_rx_pts_discontinuities++;
+    }
+
+    if (!frame->data || frame->size <= 0) {
+        app.audio_rx_empty_frames++;
+        if (app.audio_rx_empty_frames == 1 || app.audio_rx_empty_frames % 10 == 0) {
+            ESP_LOGW(TAG, "audio rx empty frames=%u total_frames=%u pts=%u size=%d",
+                     (unsigned)app.audio_rx_empty_frames,
+                     (unsigned)app.audio_rx_frames,
+                     (unsigned)frame->pts,
+                     frame->size);
+        }
+        return 0;
+    }
+
+    int16_t decoded_min = INT16_MAX;
+    int16_t decoded_max = INT16_MIN;
+    uint32_t peak = 0;
+    uint64_t sum_squares = 0;
+    for (int i = 0; i < frame->size; i++) {
+        int16_t sample = alaw_to_linear16(frame->data[i]);
+        if (sample < decoded_min) {
+            decoded_min = sample;
+        }
+        if (sample > decoded_max) {
+            decoded_max = sample;
+        }
+        int32_t abs_sample = sample < 0 ? -(int32_t)sample : sample;
+        if ((uint32_t)abs_sample > peak) {
+            peak = (uint32_t)abs_sample;
+        }
+        sum_squares += (uint64_t)abs_sample * (uint64_t)abs_sample;
+    }
+
+    app.audio_rx_decode_samples += size;
+    app.audio_rx_decode_min = decoded_min;
+    app.audio_rx_decode_max = decoded_max;
+    app.audio_rx_decode_peak = peak;
+    app.audio_rx_decode_rms = isqrt_u64(sum_squares / size);
+
+    if (app.audio_rx_frames == 1 || app.audio_rx_frames % 50 == 0 || pts_discontinuity) {
+        ESP_LOGI(TAG, "audio rx frames=%u bytes=%u empty=%u pts=%u pts_delta=%u pts_discont=%u last_size=%u",
                  (unsigned)app.audio_rx_frames,
                  (unsigned)app.audio_rx_bytes,
+                 (unsigned)app.audio_rx_empty_frames,
                  (unsigned)frame->pts,
-                 frame->size);
+                 (unsigned)pts_delta,
+                 (unsigned)app.audio_rx_pts_discontinuities,
+                 (unsigned)app.audio_rx_last_size);
+        ESP_LOGI(TAG, "audio rx decode samples=%u invalid=%u rms=%u peak=%u min=%d max=%d",
+                 (unsigned)app.audio_rx_decode_samples,
+                 (unsigned)app.audio_rx_decode_invalid,
+                 (unsigned)app.audio_rx_decode_rms,
+                 (unsigned)app.audio_rx_decode_peak,
+                 app.audio_rx_decode_min,
+                 app.audio_rx_decode_max);
     }
     return 0;
 }
@@ -501,26 +609,7 @@ static void audio_test_task(void *arg)
 }
 #endif
 
-#if CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
-static uint32_t isqrt_u64(uint64_t value)
-{
-    uint64_t bit = 1ULL << 62;
-    while (bit > value) {
-        bit >>= 2;
-    }
-    uint32_t result = 0;
-    while (bit) {
-        if (value >= result + bit) {
-            value -= result + bit;
-            result = (result >> 1) + bit;
-        } else {
-            result >>= 1;
-        }
-        bit >>= 2;
-    }
-    return result;
-}
-
+#if CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
 typedef struct {
     uint8_t reg;
     uint8_t value;
@@ -812,7 +901,9 @@ static void audio_mic_task(void *arg)
 
 static esp_peer_media_dir_t configured_audio_dir(void)
 {
-#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
+#if CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
+    return ESP_PEER_MEDIA_DIR_SEND_RECV;
+#elif CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
     return ESP_PEER_MEDIA_DIR_SEND_ONLY;
 #else
     return ESP_PEER_MEDIA_DIR_NONE;
@@ -823,6 +914,8 @@ static const char *configured_media_mode(void)
 {
 #if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
     return "audio-test-source";
+#elif CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
+    return "core-s3-mic-duplex";
 #elif CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
     return "core-s3-mic-source";
 #elif CONFIG_STACKCHAN_MEDIA_VIDEO_PLACEHOLDER
@@ -861,7 +954,7 @@ static void close_peer_for_reoffer(void)
     }
 
     ESP_LOGI(TAG, "closing stale peer before reoffer");
-#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
+#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
     app.audio_task_running = false;
 #endif
     app.peer_loop_running = false;
@@ -967,7 +1060,7 @@ static esp_err_t ensure_peer_open(void)
     if (ret != 0) {
         return ESP_FAIL;
     }
-#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
+#if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
     app.audio_task_running = true;
 #endif
 #if CONFIG_STACKCHAN_MEDIA_AUDIO_TEST_SOURCE
@@ -976,7 +1069,7 @@ static esp_err_t ensure_peer_open(void)
         app.audio_task_running = false;
         return ESP_ERR_NO_MEM;
     }
-#elif CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE
+#elif CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_SOURCE || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
     if (xTaskCreate(audio_mic_task, "audio_mic", 6144, NULL, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "failed to start CoreS3 mic task");
         app.audio_task_running = false;

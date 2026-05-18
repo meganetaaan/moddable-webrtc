@@ -15,6 +15,7 @@ import {
   summarizeIceCandidate,
   summarizeIceServers,
   summarizeInboundRtpReport,
+  summarizeOutboundRtpReport,
 
   summarizeSdpMedia,
   summarizeSelectedCandidatePair,
@@ -49,6 +50,10 @@ describe('browser probe helpers', () => {
 
   it('treats media=mic as a browser audio recvonly request', () => {
     assert.equal(parseProbeConfig('?media=mic', 'http://127.0.0.1:18090').media, 'audio');
+  });
+
+  it('parses media=audio-duplex as bidirectional audio', () => {
+    assert.equal(parseProbeConfig('?media=audio-duplex', 'http://127.0.0.1:18090').media, 'audio-duplex');
   });
 
   it('builds raw-candidate AppRTC messages instead of serializing the full RTCIceCandidate object', () => {
@@ -215,6 +220,19 @@ describe('browser probe helpers', () => {
         totalSamplesReceived: 960,
       }),
       'stats audio packets=12 bytes=1920 evidence=960',
+    );
+  });
+
+  it('summarizes audio outbound RTP with packet and byte evidence', () => {
+    assert.equal(
+      summarizeOutboundRtpReport({
+        type: 'outbound-rtp',
+        kind: 'audio',
+        packetsSent: 12,
+        bytesSent: 1920,
+        totalSamplesSent: 960,
+      }),
+      'stats outbound audio packets=12 bytes=1920 evidence=960',
     );
   });
 
