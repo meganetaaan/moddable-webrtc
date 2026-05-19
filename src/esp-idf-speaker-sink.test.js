@@ -47,13 +47,23 @@ describe('ESP-IDF CoreS3 speaker sink', () => {
     }
   });
 
-  it('keeps the standalone speaker tone sample smooth instead of square-wave harsh', async () => {
+  it('keeps the standalone speaker tone sample smooth and below clipping-prone levels', async () => {
     const sample = await readFile(new URL('../firmware/esp-idf-speaker-tone/main/main.c', import.meta.url), 'utf8');
 
+    assert.match(sample, /#define SPEAKER_TONE_AMPLITUDE\s+3000/);
     assert.match(sample, /static const int16_t sine_table_64\[64\]/);
     assert.match(sample, /phase_step_q16/);
     assert.match(sample, /pcm\[i\] = sine_table_64\[\(phase_q16 >> 16\) & 63\]/);
     assert.doesNotMatch(sample, /\?\s*12000\s*:\s*-12000/);
+    assert.doesNotMatch(sample, /\b12000\b/);
+  });
+
+  it('attenuates decoded browser audio before writing to the CoreS3 speaker', async () => {
+    const source = await readFile(mainCPath, 'utf8');
+
+    assert.match(source, /#define CORE_S3_SPEAKER_OUTPUT_GAIN_Q15\s+8192/);
+    assert.match(source, /static int16_t scale_speaker_pcm_sample\(int16_t sample\)/);
+    assert.match(source, /speaker_pcm\[i\]\s*=\s*scale_speaker_pcm_sample\(sample\)/);
   });
 
   it('enables the CoreS3 speaker amplifier before writing I2S samples', async () => {

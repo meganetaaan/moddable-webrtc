@@ -43,6 +43,7 @@
 #define CORE_S3_SPEAKER_MAX_FRAME_SAMPLES 320
 #define CORE_S3_SPEAKER_WRITE_TIMEOUT_MS 20
 #define CORE_S3_SPEAKER_MCLK_GPIO 0
+#define CORE_S3_SPEAKER_OUTPUT_GAIN_Q15 8192
 #define CORE_S3_MIC_FRAME_DURATION_MS ((CONFIG_STACKCHAN_CORE_S3_MIC_FRAME_SAMPLES * 1000U) / CORE_S3_MIC_SAMPLE_RATE)
 #define AUDIO_TEST_TONE_HZ 440U
 #define AUDIO_TEST_TONE_AMPLITUDE 10000
@@ -369,6 +370,11 @@ static int16_t alaw_to_linear16(uint8_t sample)
         break;
     }
     return (sample & 0x80) ? value : -value;
+}
+
+static int16_t scale_speaker_pcm_sample(int16_t sample)
+{
+    return (int16_t)(((int32_t)sample * CORE_S3_SPEAKER_OUTPUT_GAIN_Q15) >> 15);
 }
 
 #if CONFIG_STACKCHAN_MEDIA_CORE_S3_SPEAKER_SINK || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
@@ -718,7 +724,7 @@ static int peer_audio_data_callback(esp_peer_audio_frame_t *frame, void *ctx)
         int16_t sample = alaw_to_linear16(frame->data[i]);
 #if CONFIG_STACKCHAN_MEDIA_CORE_S3_SPEAKER_SINK || CONFIG_STACKCHAN_MEDIA_CORE_S3_MIC_DUPLEX
         if ((uint32_t)i < speaker_samples) {
-            speaker_pcm[i] = sample;
+            speaker_pcm[i] = scale_speaker_pcm_sample(sample);
         }
 #endif
         if (sample < decoded_min) {
