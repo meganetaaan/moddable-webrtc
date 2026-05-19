@@ -41,6 +41,7 @@
 #define CORE_S3_SPEAKER_SAMPLE_RATE 8000
 #define CORE_S3_SPEAKER_CHANNELS 1
 #define CORE_S3_SPEAKER_MAX_FRAME_SAMPLES 320
+#define CORE_S3_SPEAKER_WRITE_TIMEOUT_MS 20
 #define CORE_S3_MIC_FRAME_DURATION_MS ((CONFIG_STACKCHAN_CORE_S3_MIC_FRAME_SAMPLES * 1000U) / CORE_S3_MIC_SAMPLE_RATE)
 #define AUDIO_TEST_TONE_HZ 440U
 #define AUDIO_TEST_TONE_AMPLITUDE 10000
@@ -651,7 +652,7 @@ static void core_s3_speaker_write_pcm(const int16_t *samples, uint32_t sample_co
 
     size_t bytes_written = 0;
     size_t write_bytes = sample_count * sizeof(samples[0]);
-    ret = i2s_channel_write(app.speaker_tx, samples, write_bytes, &bytes_written, 0);
+    ret = i2s_channel_write(app.speaker_tx, samples, write_bytes, &bytes_written, pdMS_TO_TICKS(CORE_S3_SPEAKER_WRITE_TIMEOUT_MS));
     app.audio_rx_speaker_last_ret = ret;
     if (ret == ESP_OK && bytes_written > 0) {
         app.audio_rx_speaker_write_frames++;

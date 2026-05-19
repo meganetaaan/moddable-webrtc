@@ -32,6 +32,17 @@ static int active_sda_gpio = CORE_S3_I2C_SDA_GPIO;
 static int active_scl_gpio = CORE_S3_I2C_SCL_GPIO;
 static i2c_port_num_t active_i2c_port = I2C_NUM_1;
 
+static const int16_t sine_table_64[64] = {
+    0, 1176, 2341, 3483, 4592, 5657, 6667, 7613,
+    8485, 9276, 9978, 10583, 11087, 11483, 11769, 11942,
+    12000, 11942, 11769, 11483, 11087, 10583, 9978, 9276,
+    8485, 7613, 6667, 5657, 4592, 3483, 2341, 1176,
+    0, -1176, -2341, -3483, -4592, -5657, -6667, -7613,
+    -8485, -9276, -9978, -10583, -11087, -11483, -11769, -11942,
+    -12000, -11942, -11769, -11483, -11087, -10583, -9978, -9276,
+    -8485, -7613, -6667, -5657, -4592, -3483, -2341, -1176,
+};
+
 static esp_err_t add_i2c_device(uint8_t addr, i2c_master_dev_handle_t *device)
 {
     i2c_device_config_t config = {
@@ -317,8 +328,8 @@ static void speaker_task(void *arg)
 {
     (void)arg;
     int16_t pcm[SPEAKER_FRAMES_PER_WRITE];
-    uint32_t phase = 0;
-    const uint32_t half_period = SPEAKER_SAMPLE_RATE / (SPEAKER_TONE_HZ * 2);
+    uint32_t phase_q16 = 0;
+    const uint32_t phase_step_q16 = (uint32_t)(((uint64_t)SPEAKER_TONE_HZ * 64U * 65536U) / SPEAKER_SAMPLE_RATE);
     uint64_t writes = 0;
     uint64_t frames = 0;
     uint64_t bytes = 0;
@@ -326,8 +337,8 @@ static void speaker_task(void *arg)
 
     while (true) {
         for (size_t i = 0; i < SPEAKER_FRAMES_PER_WRITE; ++i) {
-            int16_t sample = (phase++ / half_period) & 1 ? 12000 : -12000;
-            pcm[i] = sample;
+            pcm[i] = sine_table_64[(phase_q16 >> 16) & 63];
+            phase_q16 += phase_step_q16;
         }
         size_t written = 0;
         esp_err_t ret = i2s_channel_write(speaker_tx, pcm, sizeof(pcm), &written, pdMS_TO_TICKS(1000));
