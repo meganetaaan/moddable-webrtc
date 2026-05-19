@@ -34,6 +34,19 @@ describe('ESP-IDF CoreS3 speaker sink', () => {
     assert.doesNotMatch(source, /i2s_channel_write\(app\.speaker_tx,\s*samples,\s*write_bytes,\s*&bytes_written,\s*0\)/);
   });
 
+  it('matches Moddable CoreS3 speaker I2S clock and slot framing', async () => {
+    const source = await readFile(mainCPath, 'utf8');
+    const sample = await readFile(new URL('../firmware/esp-idf-speaker-tone/main/main.c', import.meta.url), 'utf8');
+
+    for (const candidate of [source, sample]) {
+      assert.match(candidate, /#define CORE_S3_SPEAKER_MCLK_GPIO\s+0|#define SPEAKER_MCLK_GPIO\s+0/);
+      assert.match(candidate, /\.gpio_cfg\.mclk\s*=\s*(?:CORE_S3_SPEAKER_MCLK_GPIO|SPEAKER_MCLK_GPIO)/);
+      assert.match(candidate, /\.slot_cfg\.bit_shift\s*=\s*false/);
+      assert.doesNotMatch(candidate, /\.gpio_cfg\.mclk\s*=\s*I2S_GPIO_UNUSED/);
+      assert.doesNotMatch(candidate, /\.slot_cfg\.bit_shift\s*=\s*true/);
+    }
+  });
+
   it('keeps the standalone speaker tone sample smooth instead of square-wave harsh', async () => {
     const sample = await readFile(new URL('../firmware/esp-idf-speaker-tone/main/main.c', import.meta.url), 'utf8');
 

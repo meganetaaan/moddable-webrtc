@@ -42,6 +42,7 @@
 #define CORE_S3_SPEAKER_CHANNELS 1
 #define CORE_S3_SPEAKER_MAX_FRAME_SAMPLES 320
 #define CORE_S3_SPEAKER_WRITE_TIMEOUT_MS 20
+#define CORE_S3_SPEAKER_MCLK_GPIO 0
 #define CORE_S3_MIC_FRAME_DURATION_MS ((CONFIG_STACKCHAN_CORE_S3_MIC_FRAME_SAMPLES * 1000U) / CORE_S3_MIC_SAMPLE_RATE)
 #define AUDIO_TEST_TONE_HZ 440U
 #define AUDIO_TEST_TONE_AMPLITUDE 10000
@@ -571,11 +572,11 @@ static esp_err_t core_s3_speaker_i2s_start(void)
     std_config.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
     std_config.slot_cfg.ws_width = I2S_DATA_BIT_WIDTH_16BIT;
     std_config.slot_cfg.ws_pol = false;
-    std_config.slot_cfg.bit_shift = true;
+    std_config.slot_cfg.bit_shift = false;
     std_config.slot_cfg.left_align = false;
     std_config.slot_cfg.big_endian = false;
     std_config.slot_cfg.bit_order_lsb = false;
-    std_config.gpio_cfg.mclk = I2S_GPIO_UNUSED;
+    std_config.gpio_cfg.mclk = CORE_S3_SPEAKER_MCLK_GPIO;
     std_config.gpio_cfg.bclk = CONFIG_STACKCHAN_CORE_S3_SPEAKER_I2S_BCLK_GPIO;
     std_config.gpio_cfg.ws = CONFIG_STACKCHAN_CORE_S3_SPEAKER_I2S_WS_GPIO;
     std_config.gpio_cfg.dout = CONFIG_STACKCHAN_CORE_S3_SPEAKER_I2S_DOUT_GPIO;

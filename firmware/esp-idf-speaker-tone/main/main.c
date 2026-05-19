@@ -22,6 +22,7 @@ static const char *TAG = "speaker-tone";
 #define CORE_S3_SPEAKER_BCLK_GPIO 34
 #define CORE_S3_SPEAKER_WS_GPIO 33
 #define CORE_S3_SPEAKER_DOUT_GPIO 13
+#define CORE_S3_SPEAKER_MCLK_GPIO 0
 #define SPEAKER_SAMPLE_RATE 24000
 #define SPEAKER_TONE_HZ 440
 #define SPEAKER_FRAMES_PER_WRITE 480
@@ -301,11 +302,11 @@ static esp_err_t start_i2s(void)
     std_config.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
     std_config.slot_cfg.ws_width = I2S_DATA_BIT_WIDTH_16BIT;
     std_config.slot_cfg.ws_pol = false;
-    std_config.slot_cfg.bit_shift = true;
+    std_config.slot_cfg.bit_shift = false;
     std_config.slot_cfg.left_align = false;
     std_config.slot_cfg.big_endian = false;
     std_config.slot_cfg.bit_order_lsb = false;
-    std_config.gpio_cfg.mclk = I2S_GPIO_UNUSED;
+    std_config.gpio_cfg.mclk = CORE_S3_SPEAKER_MCLK_GPIO;
     std_config.gpio_cfg.bclk = CORE_S3_SPEAKER_BCLK_GPIO;
     std_config.gpio_cfg.ws = CORE_S3_SPEAKER_WS_GPIO;
     std_config.gpio_cfg.dout = CORE_S3_SPEAKER_DOUT_GPIO;
